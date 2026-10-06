@@ -1,0 +1,22 @@
+# =============================================================================
+# Telegram To-Do Bot — Production Dependencies
+# Pin minor versions for reproducible installs; allow patch updates.
+# =============================================================================
+
+# Telegram bot framework (async, v20+ API)
+python-telegram-bot==21.*
+
+# ORM (database-agnostic; SQLite dev, PostgreSQL prod)
+SQLAlchemy==2.*
+
+# Database migration tool (pairs with SQLAlchemy)
+alembic==1.*
+
+# Background scheduler (reminder jobs, daily summary)
+APScheduler==3.*
+
+# Settings / environment-variable loader with type validation
+pydantic-settings==2.*
+
+# Timezone-aware datetime support
+pytz==2024.*

@@ -1,0 +1,20 @@
+# =============================================================================
+# Telegram To-Do Bot — Development / Testing Dependencies
+# Install with: pip install -r requirements-dev.txt
+# =============================================================================
+
+# Include production deps
+-r requirements.txt
+
+# Testing framework
+pytest==8.*
+pytest-asyncio==0.23.*   # async test support for python-telegram-bot handlers
+
+# Code formatting
+black==24.*
+
+# Fast linter (replaces flake8 + isort)
+ruff==0.4.*
+
+# Git hooks (optional: run black + ruff before each commit)
+pre-commit==3.*
