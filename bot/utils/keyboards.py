@@ -209,3 +209,18 @@ def action_nav_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def reminder_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """
+    Inline keyboard attached to an automated reminder notification.
+    Provides a quick 'Mark Done' action.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Mark Done", callback_data=f"done:select:{task_id}"),
+            ]
+        ]
+    )
+

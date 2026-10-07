@@ -17,7 +17,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from bot.database.models import Task, TaskPriority, TaskStatus, User
 from bot.utils.datetime_utils import get_day_boundaries_utc
@@ -273,3 +273,77 @@ def edit_task(
     db.flush()
     logger.info("Task edited: id=%s user_id=%s", task.id, task.user_id)
     return task
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Reminder & Scheduling Queries
+# ---------------------------------------------------------------------------
+
+def get_due_tasks(
+    db: Session,
+    now_utc: Optional[datetime] = None,
+) -> list[Task]:
+    """
+    Return all pending tasks eligible for reminder delivery.
+
+    A task is eligible if and only if:
+      1. status == TaskStatus.pending
+      2. reminder_sent is False
+      3. due_at is not None
+      4. due_at <= now_utc (defaults to current UTC time)
+      5. Associated with an existing user who has a valid telegram_user_id
+
+    Tasks are ordered chronologically by due_at ascending, then id ascending.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        now_utc: Reference UTC datetime to compare against (defaults to now).
+
+    Returns:
+        List of eligible Task objects with their User relationship eagerly loaded.
+
+    Raises:
+        ValueError: If now_utc is provided but naive (lacks timezone).
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        raise ValueError("now_utc must be a timezone-aware datetime.")
+
+    return (
+        db.query(Task)
+        .options(joinedload(Task.user))
+        .join(User, Task.user_id == User.id)
+        .filter(
+            Task.status == TaskStatus.pending,
+            Task.reminder_sent.is_(False),
+            Task.due_at.isnot(None),
+            Task.due_at <= now_utc,
+            User.telegram_user_id.isnot(None),
+        )
+        .order_by(Task.due_at.asc(), Task.id.asc())
+        .all()
+    )
+
+
+def mark_reminder_sent(
+    db: Session,
+    task: Task,
+) -> Task:
+    """
+    Mark a task's reminder as sent.
+
+    Sets reminder_sent = True and flushes changes to the database.
+
+    Args:
+        db: Active database session.
+        task: Task instance to update.
+
+    Returns:
+        The updated Task instance.
+    """
+    task.reminder_sent = True
+    db.flush()
+    logger.info("Reminder marked sent for task: id=%d", task.id)
+    return task
+

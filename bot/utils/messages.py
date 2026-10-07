@@ -237,3 +237,17 @@ EDIT_SUCCESS = (
 )
 EDIT_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
 EDIT_CANCELLED = "❌ Edit cancelled. No changes were made."
+
+
+# ===========================================================================
+# Phase 5 — Reminder Notifications
+# ===========================================================================
+
+REMINDER_NOTIFICATION = (
+    "⏰ <b>Task Reminder!</b>\n\n"
+    "📌 <b>{title}</b>\n"
+    "⏰ <b>Due:</b> {due_display}\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🆔 <b>Task ID:</b> #{task_id}"
+)
+

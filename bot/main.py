@@ -14,6 +14,7 @@ Run with:
     python -m bot.main
 """
 
+import asyncio
 import logging
 import sys
 from typing import Optional
@@ -26,6 +27,8 @@ from bot.database.database import init_db
 from bot.handlers.settings import handlers as settings_handlers
 from bot.handlers.start import handlers as start_handlers, unknown_command
 from bot.handlers.tasks import handlers as task_handlers
+from bot.scheduler import create_scheduler, start_scheduler, stop_scheduler
+from bot.services.reminder_service import process_due_reminders
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +104,63 @@ def _validate_settings() -> None:
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
+# Lifecycle hooks (Scheduler & Background Workers)
+# ---------------------------------------------------------------------------
+
+async def _on_startup(application: Application) -> None:
+    """
+    Application post_init lifecycle hook.
+
+    Starts the background APScheduler instance and runs an immediate startup sweep
+    for any tasks that came due while the bot was offline.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("Initializing background reminder scheduler...")
+    scheduler = create_scheduler(application.bot)
+    start_scheduler(scheduler)
+    application.bot_data["scheduler"] = scheduler
+    logger.info(
+        "Background scheduler started (polling interval=%ds).",
+        settings.REMINDER_POLL_INTERVAL_SECONDS,
+    )
+
+    # Recovery sweep on startup for tasks due during downtime
+    try:
+        delivered = await process_due_reminders(application.bot)
+        if delivered > 0:
+            logger.info("Startup sweep: delivered %d overdue reminder(s).", delivered)
+    except Exception as exc:
+        logger.error("Error during startup reminder sweep: %s", exc, exc_info=True)
+
+
+async def _on_shutdown(application: Application) -> None:
+    """
+    Application post_shutdown lifecycle hook.
+
+    Cleanly shuts down the background scheduler.
+    """
+    logger = logging.getLogger(__name__)
+    scheduler = application.bot_data.get("scheduler")
+    if scheduler:
+        logger.info("Shutting down background scheduler...")
+        stop_scheduler(scheduler)
+        await asyncio.sleep(0)
+        logger.info("Background scheduler stopped cleanly.")
+
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
 
 def _build_application() -> Application:
     """Create and configure the python-telegram-bot Application."""
-    app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(settings.TELEGRAM_BOT_TOKEN)
+        .post_init(_on_startup)
+        .post_shutdown(_on_shutdown)
+        .build()
+    )
 
     # --- Register handlers in priority order ---
     # 1. Core navigation handlers (/start, /help, /cancel)

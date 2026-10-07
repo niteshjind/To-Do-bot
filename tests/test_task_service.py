@@ -21,10 +21,12 @@ from bot.services.task_service import (
     create_task,
     delete_task,
     edit_task,
+    get_due_tasks,
     get_pending_tasks,
     get_task_by_id,
     get_today_tasks,
     get_upcoming_tasks,
+    mark_reminder_sent,
 )
 from bot.services.user_service import get_or_create_user
 
@@ -736,3 +738,116 @@ class TestGetPendingTasks:
         my_pending = get_pending_tasks(db=db_session, user=user)
         assert len(my_pending) == 1
         assert my_pending[0].title == "My pending"
+
+
+# ===========================================================================
+# Phase 5: get_due_tasks & mark_reminder_sent
+# ===========================================================================
+
+class TestGetDueTasks:
+    def test_detects_due_task(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        due_time = now - timedelta(minutes=5)
+        task = create_task(db=db_session, user=user, title="Due task", due_at_utc=due_time)
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert len(due_tasks) == 1
+        assert due_tasks[0].id == task.id
+        assert due_tasks[0].user.telegram_user_id == user.telegram_user_id
+
+    def test_excludes_future_task(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        future_time = now + timedelta(minutes=15)
+        create_task(db=db_session, user=user, title="Future task", due_at_utc=future_time)
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert due_tasks == []
+
+    def test_excludes_completed_task(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        past_time = now - timedelta(minutes=10)
+        task = create_task(db=db_session, user=user, title="Done task", due_at_utc=past_time)
+        complete_task(db=db_session, task=task)
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert due_tasks == []
+
+    def test_excludes_cancelled_task(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        past_time = now - timedelta(minutes=10)
+        task = create_task(db=db_session, user=user, title="Cancelled task", due_at_utc=past_time)
+        delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert due_tasks == []
+
+    def test_excludes_already_reminded_task(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        past_time = now - timedelta(minutes=10)
+        task = create_task(db=db_session, user=user, title="Reminded task", due_at_utc=past_time)
+        task.reminder_sent = True
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert due_tasks == []
+
+    def test_excludes_task_without_due_at(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="No due", due_at_utc=now - timedelta(hours=1))
+        task.due_at = None
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert due_tasks == []
+
+    def test_chronological_ordering(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        t_older = create_task(db=db_session, user=user, title="Older due", due_at_utc=now - timedelta(minutes=30))
+        t_recent = create_task(db=db_session, user=user, title="Recent due", due_at_utc=now - timedelta(minutes=5))
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert len(due_tasks) == 2
+        assert [t.id for t in due_tasks] == [t_older.id, t_recent.id]
+
+    def test_naive_datetime_raises_value_error(self, db_session: Session) -> None:
+        naive_now = datetime(2026, 10, 7, 10, 0, 0)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            get_due_tasks(db=db_session, now_utc=naive_now)
+
+    def test_user_ownership_and_relationship(
+        self, db_session: Session, user: User, other_user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        t_my = create_task(db=db_session, user=user, title="My task", due_at_utc=now - timedelta(minutes=5))
+        t_other = create_task(db=db_session, user=other_user, title="Other task", due_at_utc=now - timedelta(minutes=10))
+        db_session.commit()
+
+        due_tasks = get_due_tasks(db=db_session, now_utc=now)
+        assert len(due_tasks) == 2
+        # Tasks are ordered by due_at: t_other is 10 mins ago, t_my is 5 mins ago
+        assert due_tasks[0].id == t_other.id
+        assert due_tasks[0].user.telegram_user_id == other_user.telegram_user_id
+        assert due_tasks[1].id == t_my.id
+        assert due_tasks[1].user.telegram_user_id == user.telegram_user_id
+
+
+class TestMarkReminderSent:
+    def test_mark_reminder_sent_success(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Task to remind", due_at_utc=now)
+        db_session.commit()
+        assert task.reminder_sent is False
+
+        updated = mark_reminder_sent(db=db_session, task=task)
+        db_session.commit()
+
+        assert updated.reminder_sent is True
+        # Verify persisted in database
+        refreshed = db_session.query(Task).filter_by(id=task.id).one()
+        assert refreshed.reminder_sent is True
+
