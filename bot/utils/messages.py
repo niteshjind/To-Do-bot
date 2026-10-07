@@ -171,3 +171,69 @@ UPCOMING_EMPTY = (
     "No pending tasks scheduled for the next {window_days} days! 🎉\n\n"
     "Use /add to create a task."
 )
+
+
+# ===========================================================================
+# Phase 4 — Task Actions (/done, /delete, /edit)
+# ===========================================================================
+
+# --- /done ---
+DONE_NO_PENDING = "🎉 <b>All caught up!</b>\n\nYou have no pending tasks to complete."
+DONE_SELECT_TASK = "✅ <b>Mark Task as Completed</b>\n\nSelect a task below:"
+DONE_SUCCESS = "✅ <b>Task Completed!</b>\n\n<s>{title}</s>\n\nWell done! 🎉"
+DONE_ALREADY_COMPLETED = "ℹ️ Task #{task_id} is already completed."
+DONE_ALREADY_CANCELLED = "⚠️ Task #{task_id} is cancelled and cannot be completed."
+DONE_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
+DONE_CANCELLED = "❌ Action cancelled."
+
+# --- /delete ---
+DELETE_NO_TASKS = "ℹ️ You have no active tasks to delete."
+DELETE_SELECT_TASK = "🗑️ <b>Delete Task</b>\n\nSelect a task below to delete:"
+DELETE_CONFIRM = (
+    "⚠️ <b>Are you sure you want to delete this task?</b>\n\n"
+    "📌 <b>#{task_id}</b> {title}\n"
+    "⏰ <b>Reminder:</b> {due_display}\n\n"
+    "<i>This cannot be undone.</i>"
+)
+DELETE_SUCCESS = "🗑️ <b>Task Deleted</b>\n\nTask #{task_id} \"<b>{title}</b>\" has been deleted."
+DELETE_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
+DELETE_CANCELLED = "❌ Deletion cancelled."
+
+# --- /edit ---
+EDIT_NO_TASKS = "ℹ️ You have no pending tasks to edit."
+EDIT_SELECT_TASK = "✏️ <b>Edit Task</b>\n\nSelect a task below to edit:"
+EDIT_MENU = (
+    "✏️ <b>Editing Task #{task_id}</b>\n\n"
+    "📝 <b>Title:</b> {title}\n"
+    "⏰ <b>Reminder:</b> {due_display}\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n\n"
+    "What would you like to edit?"
+)
+EDIT_ASK_TITLE = "📝 <b>Edit Title</b>\n\nCurrent: <i>{current_title}</i>\n\nPlease enter the new title:"
+EDIT_ASK_DATE = (
+    "📅 <b>Edit Date</b>\n\n"
+    "Current date: <code>{current_date}</code>\n\n"
+    "Please enter the new date (<code>DD/MM/YYYY</code>):"
+)
+EDIT_ASK_TIME = (
+    "⏰ <b>Edit Time</b>\n\n"
+    "Current time: <code>{current_time}</code>\n\n"
+    "Please enter the new time (<code>HH:MM</code> 24-hour):"
+)
+EDIT_ASK_PRIORITY = "🏷️ <b>Edit Priority</b>\n\nCurrent: {priority_icon} {priority_label}\n\nSelect the new priority:"
+EDIT_CONFIRM = (
+    "📋 <b>Review Changes for Task #{task_id}</b>\n\n"
+    "📝 <b>Title:</b> {title}\n"
+    "⏰ <b>Reminder:</b> {due_display}\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n\n"
+    "Save these changes?"
+)
+EDIT_SUCCESS = (
+    "✅ <b>Task Updated!</b>\n\n"
+    "📝 {title}\n"
+    "⏰ <b>Reminder:</b> {due_display}\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "📌 <b>Task ID:</b> #{task_id}"
+)
+EDIT_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
+EDIT_CANCELLED = "❌ Edit cancelled. No changes were made."

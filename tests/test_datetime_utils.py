@@ -25,6 +25,7 @@ from bot.utils.datetime_utils import (
     format_dt_local,
     format_time_only,
     get_day_boundaries_utc,
+    get_local_date_and_time,
     is_in_past,
     parse_date,
     parse_time,
@@ -339,3 +340,23 @@ class TestListingFormatting:
         future_utc = datetime(2035, 12, 25, 12, 0, tzinfo=timezone.utc)
         heading = format_date_heading(future_utc, "Asia/Kolkata")
         assert "25 Dec" in heading
+
+
+# ===========================================================================
+# Phase 4: get_local_date_and_time
+# ===========================================================================
+
+class TestGetLocalDateAndTime:
+    def test_extracts_correct_local_components(self) -> None:
+        # UTC 04:30 == IST 10:00 on 07/10/2026
+        dt = datetime(2026, 10, 7, 4, 30, tzinfo=timezone.utc)
+        local_d, local_t = get_local_date_and_time(dt, "Asia/Kolkata")
+        assert local_d == date(2026, 10, 7)
+        assert local_t == time(10, 0)
+
+    def test_cross_day_boundary(self) -> None:
+        # UTC 19:30 on 06/10/2026 == IST 01:00 on 07/10/2026
+        dt = datetime(2026, 10, 6, 19, 30, tzinfo=timezone.utc)
+        local_d, local_t = get_local_date_and_time(dt, "Asia/Kolkata")
+        assert local_d == date(2026, 10, 7)
+        assert local_t == time(1, 0)

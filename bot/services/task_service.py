@@ -14,7 +14,7 @@ Design rules:
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -154,15 +154,23 @@ def get_upcoming_tasks(
     )
 
 
-# Phase 4: actions
-def complete_task(db: Session, task: Task) -> Task:  # type: ignore[return]
-    """Mark a task as completed. Implemented in Phase 4."""
-    raise NotImplementedError("Implemented in Phase 4")
+# ---------------------------------------------------------------------------
+# Phase 4: Task Actions (/done, /delete, /edit)
+# ---------------------------------------------------------------------------
 
-
-def cancel_task(db: Session, task: Task) -> Task:  # type: ignore[return]
-    """Mark a task as cancelled. Implemented in Phase 4."""
-    raise NotImplementedError("Implemented in Phase 4")
+def get_pending_tasks(db: Session, user: User) -> list[Task]:
+    """
+    Return all pending tasks for the given user, ordered chronologically.
+    """
+    return (
+        db.query(Task)
+        .filter(
+            Task.user_id == user.id,
+            Task.status == TaskStatus.pending,
+        )
+        .order_by(Task.due_at.asc(), Task.id.asc())
+        .all()
+    )
 
 
 def get_task_by_id(
@@ -172,10 +180,96 @@ def get_task_by_id(
     Fetch a task by ID, verifying it belongs to the given user.
 
     Returns None if the task doesn't exist or belongs to a different user.
-    Used in Phase 4 and beyond for all task actions.
     """
     return (
         db.query(Task)
         .filter(Task.id == task_id, Task.user_id == user_id)
         .first()
     )
+
+
+def complete_task(db: Session, task: Task) -> Task:
+    """
+    Mark a task as completed and record completed_at in UTC.
+
+    Raises:
+        ValueError: If the task is already completed or cancelled.
+    """
+    if task.status == TaskStatus.completed:
+        raise ValueError("Task is already completed.")
+    if task.status == TaskStatus.cancelled:
+        raise ValueError("Task is cancelled and cannot be completed.")
+
+    task.status = TaskStatus.completed
+    task.completed_at = datetime.now(timezone.utc)
+    db.flush()
+
+    logger.info("Task completed: id=%s user_id=%s", task.id, task.user_id)
+    return task
+
+
+def delete_task(db: Session, task: Task, hard_delete: bool = False) -> Task:
+    """
+    Delete a task (defaults to soft delete by setting status to cancelled).
+
+    Raises:
+        ValueError: If the task is already cancelled.
+    """
+    if task.status == TaskStatus.cancelled:
+        raise ValueError("Task is already cancelled.")
+
+    if hard_delete:
+        db.delete(task)
+    else:
+        task.status = TaskStatus.cancelled
+
+    db.flush()
+    logger.info("Task deleted: id=%s user_id=%s hard_delete=%s", task.id, task.user_id, hard_delete)
+    return task
+
+
+# Alias for backwards compatibility / semantic clarity
+cancel_task = delete_task
+
+
+def edit_task(
+    db: Session,
+    task: Task,
+    title: Optional[str] = None,
+    due_at_utc: Optional[datetime] = None,
+    priority: Optional[TaskPriority] = None,
+) -> Task:
+    """
+    Edit specific fields of an existing task without altering untouched fields.
+
+    Raises:
+        ValueError: If title is empty or exceeds MAX_TITLE_LENGTH.
+        ValueError: If due_at_utc is naive.
+        ValueError: If task is cancelled.
+    """
+    if task.status == TaskStatus.cancelled:
+        raise ValueError("Cannot edit a cancelled task.")
+
+    if title is not None:
+        cleaned_title = title.strip()
+        if not cleaned_title:
+            raise ValueError("Task title cannot be empty.")
+        if len(cleaned_title) > MAX_TITLE_LENGTH:
+            raise ValueError(
+                f"Task title exceeds maximum length of {MAX_TITLE_LENGTH} characters."
+            )
+        task.title = cleaned_title
+
+    if due_at_utc is not None:
+        if due_at_utc.tzinfo is None:
+            raise ValueError("due_at_utc must be a timezone-aware datetime.")
+        task.due_at = due_at_utc
+        # Reset reminder sent flag if time changes so reminder can be delivered
+        task.reminder_sent = False
+
+    if priority is not None:
+        task.priority = priority
+
+    db.flush()
+    logger.info("Task edited: id=%s user_id=%s", task.id, task.user_id)
+    return task

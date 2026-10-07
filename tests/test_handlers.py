@@ -25,17 +25,46 @@ from bot.handlers.tasks import (
     ASK_TIME,
     ASK_TITLE,
     CONFIRM,
+    STATE_EDIT_CHOOSE_FIELD,
+    STATE_EDIT_CONFIRM,
+    STATE_EDIT_INPUT_DATE,
+    STATE_EDIT_INPUT_PRIORITY,
+    STATE_EDIT_INPUT_TIME,
+    STATE_EDIT_INPUT_TITLE,
+    STATE_EDIT_SELECT_TASK,
     UD_DATE,
+    UD_EDIT_NEW_DUE,
+    UD_EDIT_NEW_PRIORITY,
+    UD_EDIT_NEW_TITLE,
+    UD_EDIT_ORIG_DUE,
+    UD_EDIT_ORIG_PRIORITY,
+    UD_EDIT_ORIG_TITLE,
+    UD_EDIT_TASK_ID,
+    UD_EDIT_TIMEZONE,
     UD_PRIORITY,
     UD_TIME,
     UD_TIMEZONE,
     UD_TITLE,
     add_start,
     cancel_add,
+    cancel_edit,
     confirm_text_guard,
+    delete_ask_callback,
+    delete_command,
+    delete_confirm_callback,
+    done_callback,
+    done_command,
+    edit_choose_field_callback,
+    edit_select_task_callback,
+    edit_start,
     priority_text_guard,
     receive_confirmation,
     receive_date,
+    receive_edit_confirmation,
+    receive_edit_date,
+    receive_edit_priority,
+    receive_edit_time,
+    receive_edit_title,
     receive_priority,
     receive_time,
     receive_title,
@@ -47,6 +76,14 @@ from bot.handlers.tasks import (
 from bot.utils.keyboards import (
     CB_CONFIRM_CANCEL,
     CB_CONFIRM_SAVE,
+    CB_DELETE_CANCEL,
+    CB_DONE_CANCEL,
+    CB_EDIT_CANCEL,
+    CB_EDIT_FIELD_DATE,
+    CB_EDIT_FIELD_PRIORITY,
+    CB_EDIT_FIELD_TIME,
+    CB_EDIT_FIELD_TITLE,
+    CB_EDIT_SAVE,
     CB_PRIORITY_HIGH,
     CB_PRIORITY_LOW,
     CB_TODAY_REFRESH,
@@ -389,3 +426,296 @@ async def test_upcoming_callback_refresh(db_session, mock_context):
 
     update.callback_query.answer.assert_awaited_once()
     update.callback_query.edit_message_text.assert_awaited_once()
+
+
+# ===========================================================================
+# Phase 4: /done Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_done_command_with_arg_success(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=11101, username="done_user")
+    task = create_task(db_session, user=user, title="Task to complete", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    update = _create_mock_update(user_id=11101, text=f"/done {task.id}")
+    mock_context.args = [str(task.id)]
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    args, kwargs = update.message.reply_text.call_args
+    assert "Task Completed!" in args[0]
+    assert task.status == TaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_done_command_with_arg_not_found(db_session, mock_context):
+    update = _create_mock_update(user_id=11102, text="/done 9999")
+    mock_context.args = ["9999"]
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    args, _ = update.message.reply_text.call_args
+    assert "not found" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_done_command_no_arg_empty(db_session, mock_context):
+    update = _create_mock_update(user_id=11103, text="/done")
+    mock_context.args = []
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    args, _ = update.message.reply_text.call_args
+    assert "no pending tasks" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_done_command_no_arg_with_tasks(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=11104, username="done_user2")
+    create_task(db_session, user=user, title="Task pending", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    update = _create_mock_update(user_id=11104, text="/done")
+    mock_context.args = []
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    _, kwargs = update.message.reply_text.call_args
+    assert kwargs.get("reply_markup") is not None
+
+
+@pytest.mark.asyncio
+async def test_done_callback_select(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=11105, username="done_user3")
+    task = create_task(db_session, user=user, title="Callback task", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    update = _create_mock_update(user_id=11105, callback_data=f"done:select:{task.id}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_callback(update, mock_context)
+
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_once()
+    assert task.status == TaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_done_callback_cancel(mock_context):
+    update = _create_mock_update(callback_data=CB_DONE_CANCEL)
+    await done_callback(update, mock_context)
+    update.callback_query.edit_message_text.assert_awaited_once()
+    args, _ = update.callback_query.edit_message_text.call_args
+    assert "Action cancelled" in args[0]
+
+
+# ===========================================================================
+# Phase 4: /delete Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_delete_command_with_arg(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=12101, username="del_user")
+    task = create_task(db_session, user=user, title="Task to delete", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    update = _create_mock_update(user_id=12101, text=f"/delete {task.id}")
+    mock_context.args = [str(task.id)]
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await delete_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    args, kwargs = update.message.reply_text.call_args
+    assert "delete this task" in args[0]
+    assert kwargs.get("reply_markup") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_confirm_and_cancel_callbacks(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=12102, username="del_user2")
+    task = create_task(db_session, user=user, title="Confirm delete", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    # Cancel first
+    update_cancel = _create_mock_update(user_id=12102, callback_data=CB_DELETE_CANCEL)
+    await delete_confirm_callback(update_cancel, mock_context)
+    update_cancel.callback_query.edit_message_text.assert_awaited_once()
+
+    # Confirm delete
+    update_confirm = _create_mock_update(user_id=12102, callback_data=f"delete:confirm:{task.id}")
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await delete_confirm_callback(update_confirm, mock_context)
+
+    update_confirm.callback_query.edit_message_text.assert_awaited_once()
+    args, _ = update_confirm.callback_query.edit_message_text.call_args
+    assert "Task Deleted" in args[0]
+    assert task.status == TaskStatus.cancelled
+
+
+# ===========================================================================
+# Phase 4: /edit ConversationHandler Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_edit_start_no_tasks(db_session, mock_context):
+    update = _create_mock_update(user_id=13101, text="/edit")
+    mock_context.args = []
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        state = await edit_start(update, mock_context)
+
+    assert state == ConversationHandler.END
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_start_with_arg(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=13102, username="edit_user")
+    task = create_task(db_session, user=user, title="Task to edit", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    update = _create_mock_update(user_id=13102, text=f"/edit {task.id}")
+    mock_context.args = [str(task.id)]
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        state = await edit_start(update, mock_context)
+
+    assert state == STATE_EDIT_CHOOSE_FIELD
+    assert mock_context.user_data[UD_EDIT_TASK_ID] == task.id
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_flow_title(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 10
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = "Old Title"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = TaskPriority.medium
+
+    # Choose Title
+    update_choose = _create_mock_update(callback_data=CB_EDIT_FIELD_TITLE)
+    state_choose = await edit_choose_field_callback(update_choose, mock_context)
+    assert state_choose == STATE_EDIT_INPUT_TITLE
+
+    # Enter new title
+    update_input = _create_mock_update(text="New Brand Title")
+    state_input = await receive_edit_title(update_input, mock_context)
+    assert state_input == STATE_EDIT_CONFIRM
+    assert mock_context.user_data[UD_EDIT_NEW_TITLE] == "New Brand Title"
+
+
+@pytest.mark.asyncio
+async def test_edit_flow_date(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 10
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = "Task"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = TaskPriority.medium
+
+    update_input = _create_mock_update(text="25/12/2030")
+    state_input = await receive_edit_date(update_input, mock_context)
+    assert state_input == STATE_EDIT_CONFIRM
+    assert mock_context.user_data[UD_EDIT_NEW_DUE] is not None
+
+
+@pytest.mark.asyncio
+async def test_edit_flow_time(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 10
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = "Task"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = TaskPriority.medium
+
+    update_input = _create_mock_update(text="18:45")
+    state_input = await receive_edit_time(update_input, mock_context)
+    assert state_input == STATE_EDIT_CONFIRM
+    assert mock_context.user_data[UD_EDIT_NEW_DUE] is not None
+
+
+@pytest.mark.asyncio
+async def test_edit_flow_priority(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 10
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = "Task"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = TaskPriority.low
+
+    update_cb = _create_mock_update(callback_data=CB_PRIORITY_HIGH)
+    state = await receive_edit_priority(update_cb, mock_context)
+    assert state == STATE_EDIT_CONFIRM
+    assert mock_context.user_data[UD_EDIT_NEW_PRIORITY] == TaskPriority.high
+
+
+@pytest.mark.asyncio
+async def test_edit_confirmation_save(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=13105, username="edit_save_user")
+    task = create_task(db_session, user=user, title="Before Edit", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1))
+    db_session.commit()
+
+    mock_context.user_data[UD_EDIT_TASK_ID] = task.id
+    mock_context.user_data[UD_EDIT_TIMEZONE] = user.timezone
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = task.title
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+    mock_context.user_data[UD_EDIT_NEW_TITLE] = "After Edit Title"
+
+    update = _create_mock_update(user_id=13105, callback_data=CB_EDIT_SAVE)
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        state = await receive_edit_confirmation(update, mock_context)
+
+    assert state == ConversationHandler.END
+    update.callback_query.edit_message_text.assert_awaited_once()
+    assert task.title == "After Edit Title"
+
+
+@pytest.mark.asyncio
+async def test_cancel_edit(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 5
+    update = _create_mock_update(text="/cancel")
+
+    state = await cancel_edit(update, mock_context)
+    assert state == ConversationHandler.END
+    assert UD_EDIT_TASK_ID not in mock_context.user_data

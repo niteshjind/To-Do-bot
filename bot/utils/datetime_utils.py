@@ -212,3 +212,15 @@ def format_date_heading(dt_utc: datetime, tz_string: str) -> str:
         return f"Tomorrow, {local_dt.strftime('%d %b')}"
     else:
         return local_dt.strftime("%a, %d %b")
+
+
+def get_local_date_and_time(dt_utc: datetime, tz_string: str) -> tuple[date, time]:
+    """
+    Extract local date and time components from a UTC datetime.
+
+    Used when partially editing a task (e.g. editing date while preserving
+    time, or vice versa).
+    """
+    local_tz = pytz.timezone(tz_string)
+    local_dt = dt_utc.astimezone(local_tz)
+    return local_dt.date(), local_dt.time()

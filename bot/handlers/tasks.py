@@ -40,7 +40,16 @@ from telegram.ext import (
 from bot.config import settings
 from bot.database.database import get_db
 from bot.database.models import Task, TaskPriority, TaskStatus
-from bot.services.task_service import create_task, get_today_tasks, get_upcoming_tasks
+from bot.services.task_service import (
+    create_task,
+    delete_task,
+    edit_task,
+    complete_task,
+    get_pending_tasks,
+    get_task_by_id,
+    get_today_tasks,
+    get_upcoming_tasks,
+)
 from bot.services.user_service import get_or_create_user, get_user_by_telegram_id
 from bot.utils.datetime_utils import (
     combine_to_utc,
@@ -50,6 +59,7 @@ from bot.utils.datetime_utils import (
     format_date_only,
     format_dt_local,
     format_time_only,
+    get_local_date_and_time,
     is_in_past,
     parse_date,
     parse_time,
@@ -57,6 +67,14 @@ from bot.utils.datetime_utils import (
 from bot.utils.keyboards import (
     CB_CONFIRM_CANCEL,
     CB_CONFIRM_SAVE,
+    CB_DELETE_CANCEL,
+    CB_DONE_CANCEL,
+    CB_EDIT_CANCEL,
+    CB_EDIT_FIELD_DATE,
+    CB_EDIT_FIELD_PRIORITY,
+    CB_EDIT_FIELD_TIME,
+    CB_EDIT_FIELD_TITLE,
+    CB_EDIT_SAVE,
     CB_PRIORITY_HIGH,
     CB_PRIORITY_LOW,
     CB_PRIORITY_MEDIUM,
@@ -66,8 +84,13 @@ from bot.utils.keyboards import (
     CB_VIEW_UPCOMING,
     PRIORITY_ICONS,
     STATUS_ICONS,
+    action_nav_keyboard,
+    confirm_delete_keyboard,
+    confirm_edit_keyboard,
     confirm_task_keyboard,
+    edit_fields_keyboard,
     priority_keyboard,
+    task_selection_keyboard,
     today_keyboard,
     upcoming_keyboard,
 )
@@ -79,6 +102,30 @@ from bot.utils.messages import (
     ADD_TASK_CONFIRM,
     ADD_TASK_START,
     ADD_TASK_SUCCESS,
+    DELETE_CANCELLED,
+    DELETE_CONFIRM,
+    DELETE_NOT_FOUND,
+    DELETE_NO_TASKS,
+    DELETE_SELECT_TASK,
+    DELETE_SUCCESS,
+    DONE_ALREADY_CANCELLED,
+    DONE_ALREADY_COMPLETED,
+    DONE_CANCELLED,
+    DONE_NOT_FOUND,
+    DONE_NO_PENDING,
+    DONE_SELECT_TASK,
+    DONE_SUCCESS,
+    EDIT_ASK_DATE,
+    EDIT_ASK_PRIORITY,
+    EDIT_ASK_TIME,
+    EDIT_ASK_TITLE,
+    EDIT_CANCELLED,
+    EDIT_CONFIRM,
+    EDIT_MENU,
+    EDIT_NOT_FOUND,
+    EDIT_NO_TASKS,
+    EDIT_SELECT_TASK,
+    EDIT_SUCCESS,
     ERR_DATETIME_IN_PAST,
     ERR_INVALID_DATE,
     ERR_INVALID_TIME,
@@ -680,13 +727,676 @@ async def upcoming_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: Task Actions (/done, /delete, /edit)
+# ---------------------------------------------------------------------------
+
+# ConversationHandler states for /edit
+(
+    STATE_EDIT_SELECT_TASK,
+    STATE_EDIT_CHOOSE_FIELD,
+    STATE_EDIT_INPUT_TITLE,
+    STATE_EDIT_INPUT_DATE,
+    STATE_EDIT_INPUT_TIME,
+    STATE_EDIT_INPUT_PRIORITY,
+    STATE_EDIT_CONFIRM,
+) = range(10, 17)
+
+# Keys for context.user_data in /edit
+UD_EDIT_TASK_ID = "edit_task_id"
+UD_EDIT_ORIG_TITLE = "edit_orig_title"
+UD_EDIT_ORIG_DUE = "edit_orig_due"
+UD_EDIT_ORIG_PRIORITY = "edit_orig_priority"
+UD_EDIT_NEW_TITLE = "edit_new_title"
+UD_EDIT_NEW_DUE = "edit_new_due"
+UD_EDIT_NEW_PRIORITY = "edit_new_priority"
+UD_EDIT_TIMEZONE = "edit_timezone"
+
+_ALL_EDIT_KEYS = [
+    UD_EDIT_TASK_ID,
+    UD_EDIT_ORIG_TITLE,
+    UD_EDIT_ORIG_DUE,
+    UD_EDIT_ORIG_PRIORITY,
+    UD_EDIT_NEW_TITLE,
+    UD_EDIT_NEW_DUE,
+    UD_EDIT_NEW_PRIORITY,
+    UD_EDIT_TIMEZONE,
+]
+
+
+def _clear_edit_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all /edit keys from user_data."""
+    for k in _ALL_EDIT_KEYS:
+        context.user_data.pop(k, None)
+
+
+def _render_edit_confirm_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Build summary text for edit confirmation."""
+    task_id = context.user_data[UD_EDIT_TASK_ID]
+    tz = context.user_data[UD_EDIT_TIMEZONE]
+    title = context.user_data.get(UD_EDIT_NEW_TITLE) or context.user_data[UD_EDIT_ORIG_TITLE]
+    due_at = context.user_data.get(UD_EDIT_NEW_DUE) or context.user_data[UD_EDIT_ORIG_DUE]
+    priority = context.user_data.get(UD_EDIT_NEW_PRIORITY) or context.user_data[UD_EDIT_ORIG_PRIORITY]
+
+    due_display = format_dt_local(due_at, tz) if due_at else "No reminder"
+    p_icon = PRIORITY_ICONS.get(priority.value, "⚪")
+
+    return EDIT_CONFIRM.format(
+        task_id=task_id,
+        title=html.escape(title),
+        due_display=due_display,
+        priority_icon=p_icon,
+        priority_label=priority.value.capitalize(),
+    )
+
+
+# --- /done handlers ---
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /done [task_id]."""
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    # Case 1: user passed argument e.g. /done 5
+    if context.args and context.args[0].isdigit():
+        task_id = int(context.args[0])
+        with get_db() as db:
+            user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+            task = get_task_by_id(db, task_id, user.id)
+            if task is None:
+                await update.message.reply_text(
+                    DONE_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+                )
+                return
+            if task.status == TaskStatus.completed:
+                await update.message.reply_text(
+                    DONE_ALREADY_COMPLETED.format(task_id=task_id), parse_mode="HTML"
+                )
+                return
+            if task.status == TaskStatus.cancelled:
+                await update.message.reply_text(
+                    DONE_ALREADY_CANCELLED.format(task_id=task_id), parse_mode="HTML"
+                )
+                return
+
+            complete_task(db, task)
+            title = task.title
+
+        await update.message.reply_text(
+            DONE_SUCCESS.format(title=html.escape(title)),
+            parse_mode="HTML",
+            reply_markup=action_nav_keyboard(),
+        )
+        return
+
+    # Case 2: no arguments — show pending tasks as inline buttons
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        pending = get_pending_tasks(db, user)
+        tz = user.timezone
+
+    if not pending:
+        await update.message.reply_text(
+            DONE_NO_PENDING, parse_mode="HTML", reply_markup=action_nav_keyboard()
+        )
+        return
+
+    await update.message.reply_text(
+        DONE_SELECT_TASK,
+        parse_mode="HTML",
+        reply_markup=task_selection_keyboard(pending, "done:select", CB_DONE_CANCEL, tz),
+    )
+
+
+async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle done:select:<id> and done:cancel callbacks."""
+    query = update.callback_query
+    await query.answer()
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    if query.data == CB_DONE_CANCEL:
+        await query.edit_message_text(DONE_CANCELLED)
+        return
+
+    task_id_str = query.data.split(":")[2]
+    task_id = int(task_id_str)
+
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+        if task is None or task.status != TaskStatus.pending:
+            await query.edit_message_text(
+                DONE_ALREADY_COMPLETED.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        complete_task(db, task)
+        title = task.title
+
+    await query.edit_message_text(
+        DONE_SUCCESS.format(title=html.escape(title)),
+        parse_mode="HTML",
+        reply_markup=action_nav_keyboard(),
+    )
+
+
+# --- /delete handlers ---
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /delete [task_id]."""
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    # Case 1: argument provided e.g. /delete 5
+    if context.args and context.args[0].isdigit():
+        task_id = int(context.args[0])
+        with get_db() as db:
+            user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+            task = get_task_by_id(db, task_id, user.id)
+            if task is None or task.status == TaskStatus.cancelled:
+                await update.message.reply_text(
+                    DELETE_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+                )
+                return
+
+            due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
+            title = task.title
+
+        await update.message.reply_text(
+            DELETE_CONFIRM.format(
+                task_id=task_id,
+                title=html.escape(title),
+                due_display=due_display,
+            ),
+            parse_mode="HTML",
+            reply_markup=confirm_delete_keyboard(task_id),
+        )
+        return
+
+    # Case 2: no arguments — list user's pending tasks
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        tasks = get_pending_tasks(db, user)
+        tz = user.timezone
+
+    if not tasks:
+        await update.message.reply_text(
+            DELETE_NO_TASKS, parse_mode="HTML", reply_markup=action_nav_keyboard()
+        )
+        return
+
+    await update.message.reply_text(
+        DELETE_SELECT_TASK,
+        parse_mode="HTML",
+        reply_markup=task_selection_keyboard(tasks, "delete:ask", CB_DELETE_CANCEL, tz),
+    )
+
+
+async def delete_ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show delete confirmation after selecting task from list."""
+    query = update.callback_query
+    await query.answer()
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    task_id = int(query.data.split(":")[2])
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+        if task is None or task.status == TaskStatus.cancelled:
+            await query.edit_message_text(
+                DELETE_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
+        title = task.title
+
+    await query.edit_message_text(
+        DELETE_CONFIRM.format(
+            task_id=task_id,
+            title=html.escape(title),
+            due_display=due_display,
+        ),
+        parse_mode="HTML",
+        reply_markup=confirm_delete_keyboard(task_id),
+    )
+
+
+async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle actual deletion upon confirmation."""
+    query = update.callback_query
+    await query.answer()
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    if query.data == CB_DELETE_CANCEL:
+        await query.edit_message_text(DELETE_CANCELLED)
+        return
+
+    task_id = int(query.data.split(":")[2])
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+        if task is None or task.status == TaskStatus.cancelled:
+            await query.edit_message_text(
+                DELETE_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        delete_task(db, task)
+        title = task.title
+
+    await query.edit_message_text(
+        DELETE_SUCCESS.format(task_id=task_id, title=html.escape(title)),
+        parse_mode="HTML",
+        reply_markup=action_nav_keyboard(),
+    )
+
+
+# --- /edit ConversationHandler handlers ---
+
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for /edit [task_id]."""
+    tg_user = update.effective_user
+    if tg_user is None:
+        return ConversationHandler.END
+
+    _clear_edit_state(context)
+
+    # Case 1: user passed argument e.g. /edit 5
+    if context.args and context.args[0].isdigit():
+        task_id = int(context.args[0])
+        with get_db() as db:
+            user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+            task = get_task_by_id(db, task_id, user.id)
+            if task is None:
+                await update.message.reply_text(
+                    EDIT_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+                )
+                return ConversationHandler.END
+            if task.status == TaskStatus.cancelled:
+                await update.message.reply_text(
+                    "❌ Cannot edit a cancelled task."
+                )
+                return ConversationHandler.END
+
+            context.user_data[UD_EDIT_TASK_ID] = task.id
+            context.user_data[UD_EDIT_ORIG_TITLE] = task.title
+            context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
+            context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+            context.user_data[UD_EDIT_TIMEZONE] = user.timezone
+
+            due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
+            p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
+
+        await update.message.reply_text(
+            EDIT_MENU.format(
+                task_id=task.id,
+                title=html.escape(task.title),
+                due_display=due_display,
+                priority_icon=p_icon,
+                priority_label=task.priority.value.capitalize(),
+            ),
+            parse_mode="HTML",
+            reply_markup=edit_fields_keyboard(),
+        )
+        return STATE_EDIT_CHOOSE_FIELD
+
+    # Case 2: no arguments — list pending tasks
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        tasks = get_pending_tasks(db, user)
+        tz = user.timezone
+
+    if not tasks:
+        await update.message.reply_text(
+            EDIT_NO_TASKS, parse_mode="HTML", reply_markup=action_nav_keyboard()
+        )
+        return ConversationHandler.END
+
+    context.user_data[UD_EDIT_TIMEZONE] = tz
+    await update.message.reply_text(
+        EDIT_SELECT_TASK,
+        parse_mode="HTML",
+        reply_markup=task_selection_keyboard(tasks, "edit:select", CB_EDIT_CANCEL, tz),
+    )
+    return STATE_EDIT_SELECT_TASK
+
+
+async def edit_select_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Load selected task and show edit field options."""
+    query = update.callback_query
+    await query.answer()
+    tg_user = update.effective_user
+    if tg_user is None:
+        _clear_edit_state(context)
+        return ConversationHandler.END
+
+    task_id = int(query.data.split(":")[2])
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+        if task is None or task.status == TaskStatus.cancelled:
+            await query.edit_message_text(
+                EDIT_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+            )
+            _clear_edit_state(context)
+            return ConversationHandler.END
+
+        context.user_data[UD_EDIT_TASK_ID] = task.id
+        context.user_data[UD_EDIT_ORIG_TITLE] = task.title
+        context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
+        context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+        context.user_data[UD_EDIT_TIMEZONE] = user.timezone
+
+        due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
+        p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
+
+    await query.edit_message_text(
+        EDIT_MENU.format(
+            task_id=task.id,
+            title=html.escape(task.title),
+            due_display=due_display,
+            priority_icon=p_icon,
+            priority_label=task.priority.value.capitalize(),
+        ),
+        parse_mode="HTML",
+        reply_markup=edit_fields_keyboard(),
+    )
+    return STATE_EDIT_CHOOSE_FIELD
+
+
+async def edit_choose_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt user for new value depending on the chosen field."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    tz = context.user_data[UD_EDIT_TIMEZONE]
+    due_at = context.user_data[UD_EDIT_ORIG_DUE]
+
+    if data == CB_EDIT_FIELD_TITLE:
+        current_title = context.user_data[UD_EDIT_ORIG_TITLE]
+        await query.edit_message_text(
+            EDIT_ASK_TITLE.format(current_title=html.escape(current_title)),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_TITLE
+
+    elif data == CB_EDIT_FIELD_DATE:
+        current_date_str = format_date_only(due_at, tz) if due_at else "None"
+        await query.edit_message_text(
+            EDIT_ASK_DATE.format(current_date=current_date_str),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_DATE
+
+    elif data == CB_EDIT_FIELD_TIME:
+        current_time_str = format_time_only(due_at, tz) if due_at else "None"
+        await query.edit_message_text(
+            EDIT_ASK_TIME.format(current_time=current_time_str),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_TIME
+
+    elif data == CB_EDIT_FIELD_PRIORITY:
+        priority = context.user_data[UD_EDIT_ORIG_PRIORITY]
+        p_icon = PRIORITY_ICONS.get(priority.value, "⚪")
+        await query.edit_message_text(
+            EDIT_ASK_PRIORITY.format(
+                priority_icon=p_icon,
+                priority_label=priority.value.capitalize(),
+            ),
+            parse_mode="HTML",
+            reply_markup=priority_keyboard(),
+        )
+        return STATE_EDIT_INPUT_PRIORITY
+
+    elif data == CB_EDIT_CANCEL:
+        _clear_edit_state(context)
+        await query.edit_message_text(EDIT_CANCELLED)
+        return ConversationHandler.END
+
+    return STATE_EDIT_CHOOSE_FIELD
+
+
+async def receive_edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validate new title and show confirmation summary."""
+    title = update.message.text.strip()
+    if not title:
+        await update.message.reply_text(ERR_TITLE_EMPTY, parse_mode="HTML")
+        return STATE_EDIT_INPUT_TITLE
+    if len(title) > 500:
+        await update.message.reply_text(
+            ERR_TITLE_TOO_LONG.format(length=len(title), max_length=500),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_TITLE
+
+    context.user_data[UD_EDIT_NEW_TITLE] = title
+    confirm_text = _render_edit_confirm_text(context)
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=confirm_edit_keyboard(),
+    )
+    return STATE_EDIT_CONFIRM
+
+
+async def receive_edit_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validate new date, combine with existing time, and show confirmation summary."""
+    text = update.message.text.strip()
+    parsed_date = parse_date(text)
+    tz = context.user_data[UD_EDIT_TIMEZONE]
+
+    if parsed_date is None:
+        await update.message.reply_text(
+            ERR_INVALID_DATE.format(example_date=example_date_string(tz)),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_DATE
+
+    orig_due = context.user_data[UD_EDIT_ORIG_DUE]
+    if orig_due:
+        existing_time = get_local_date_and_time(orig_due, tz)[1]
+    else:
+        existing_time = time(9, 0)  # default morning time
+
+    combined_utc = combine_to_utc(parsed_date, existing_time, tz)
+    if is_in_past(combined_utc):
+        await update.message.reply_text(
+            ERR_DATETIME_IN_PAST.format(current_time=current_time_display(tz)),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_DATE
+
+    context.user_data[UD_EDIT_NEW_DUE] = combined_utc
+    confirm_text = _render_edit_confirm_text(context)
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=confirm_edit_keyboard(),
+    )
+    return STATE_EDIT_CONFIRM
+
+
+async def receive_edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validate new time, combine with existing date, and show confirmation summary."""
+    text = update.message.text.strip()
+    parsed_time = parse_time(text)
+    tz = context.user_data[UD_EDIT_TIMEZONE]
+
+    if parsed_time is None:
+        await update.message.reply_text(ERR_INVALID_TIME, parse_mode="HTML")
+        return STATE_EDIT_INPUT_TIME
+
+    orig_due = context.user_data[UD_EDIT_ORIG_DUE]
+    if orig_due:
+        existing_date = get_local_date_and_time(orig_due, tz)[0]
+    else:
+        import pytz
+        existing_date = datetime.now(pytz.timezone(tz)).date()
+
+    combined_utc = combine_to_utc(existing_date, parsed_time, tz)
+    if is_in_past(combined_utc):
+        await update.message.reply_text(
+            ERR_DATETIME_IN_PAST.format(current_time=current_time_display(tz)),
+            parse_mode="HTML",
+        )
+        return STATE_EDIT_INPUT_TIME
+
+    context.user_data[UD_EDIT_NEW_DUE] = combined_utc
+    confirm_text = _render_edit_confirm_text(context)
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=confirm_edit_keyboard(),
+    )
+    return STATE_EDIT_CONFIRM
+
+
+async def receive_edit_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receive new priority and show confirmation summary."""
+    query = update.callback_query
+    await query.answer()
+
+    priority = _PRIORITY_MAP.get(query.data)
+    if priority is None:
+        await query.message.reply_text(ERR_USE_BUTTONS)
+        return STATE_EDIT_INPUT_PRIORITY
+
+    context.user_data[UD_EDIT_NEW_PRIORITY] = priority
+    confirm_text = _render_edit_confirm_text(context)
+    await query.edit_message_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=confirm_edit_keyboard(),
+    )
+    return STATE_EDIT_CONFIRM
+
+
+async def receive_edit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Save changes to the database or cancel edit."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == CB_EDIT_CANCEL:
+        _clear_edit_state(context)
+        await query.edit_message_text(EDIT_CANCELLED)
+        return ConversationHandler.END
+
+    if query.data != CB_EDIT_SAVE:
+        return STATE_EDIT_CONFIRM
+
+    tg_user = update.effective_user
+    if tg_user is None:
+        _clear_edit_state(context)
+        return ConversationHandler.END
+
+    task_id = context.user_data[UD_EDIT_TASK_ID]
+    tz = context.user_data[UD_EDIT_TIMEZONE]
+    new_title = context.user_data.get(UD_EDIT_NEW_TITLE)
+    new_due = context.user_data.get(UD_EDIT_NEW_DUE)
+    new_priority = context.user_data.get(UD_EDIT_NEW_PRIORITY)
+
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+        if task is None:
+            await query.edit_message_text(EDIT_NOT_FOUND.format(task_id=task_id), parse_mode="HTML")
+            _clear_edit_state(context)
+            return ConversationHandler.END
+
+        edit_task(
+            db=db,
+            task=task,
+            title=new_title,
+            due_at_utc=new_due,
+            priority=new_priority,
+        )
+        final_title = task.title
+        final_due_str = format_dt_local(task.due_at, tz) if task.due_at else "No reminder"
+        p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
+        p_label = task.priority.value.capitalize()
+
+    _clear_edit_state(context)
+    await query.edit_message_text(
+        EDIT_SUCCESS.format(
+            task_id=task_id,
+            title=html.escape(final_title),
+            due_display=final_due_str,
+            priority_icon=p_icon,
+            priority_label=p_label,
+        ),
+        parse_mode="HTML",
+        reply_markup=action_nav_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fallback /cancel for editing."""
+    _clear_edit_state(context)
+    await update.message.reply_text(EDIT_CANCELLED)
+    return ConversationHandler.END
+
+
+# Assembly of /edit ConversationHandler
+_edit_conversation = ConversationHandler(
+    entry_points=[CommandHandler("edit", edit_start)],
+    states={
+        STATE_EDIT_SELECT_TASK: [
+            CallbackQueryHandler(edit_select_task_callback, pattern=r"^edit:select:\d+$"),
+            CallbackQueryHandler(edit_choose_field_callback, pattern=f"^{CB_EDIT_CANCEL}$"),
+        ],
+        STATE_EDIT_CHOOSE_FIELD: [
+            CallbackQueryHandler(edit_choose_field_callback, pattern=r"^edit:(field:|cancel)"),
+        ],
+        STATE_EDIT_INPUT_TITLE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_title),
+        ],
+        STATE_EDIT_INPUT_DATE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_date),
+        ],
+        STATE_EDIT_INPUT_TIME: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_time),
+        ],
+        STATE_EDIT_INPUT_PRIORITY: [
+            CallbackQueryHandler(receive_edit_priority, pattern="^priority:"),
+        ],
+        STATE_EDIT_CONFIRM: [
+            CallbackQueryHandler(receive_edit_confirmation, pattern=r"^edit:(save|cancel)$"),
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel_edit),
+    ],
+    allow_reentry=True,
+    per_chat=True,
+    per_user=True,
+    per_message=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Exported handler list — consumed by main.py
 # ---------------------------------------------------------------------------
 
 handlers = [
     _add_conversation,
+    _edit_conversation,
     CommandHandler("today", today_command),
     CommandHandler("upcoming", upcoming_command),
+    CommandHandler("done", done_command),
+    CommandHandler("delete", delete_command),
     CallbackQueryHandler(today_callback, pattern=f"^({CB_TODAY_REFRESH}|{CB_VIEW_TODAY})$"),
     CallbackQueryHandler(upcoming_callback, pattern=f"^({CB_UPCOMING_REFRESH}|{CB_VIEW_UPCOMING})$"),
+    CallbackQueryHandler(done_callback, pattern=r"^(done:select:\d+|done:cancel)$"),
+    CallbackQueryHandler(delete_ask_callback, pattern=r"^delete:ask:\d+$"),
+    CallbackQueryHandler(delete_confirm_callback, pattern=r"^(delete:confirm:\d+|delete:cancel)$"),
 ]

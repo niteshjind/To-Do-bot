@@ -17,7 +17,11 @@ from sqlalchemy.orm import Session
 from bot.database.models import Task, TaskPriority, TaskStatus, User
 from bot.services.task_service import (
     MAX_TITLE_LENGTH,
+    complete_task,
     create_task,
+    delete_task,
+    edit_task,
+    get_pending_tasks,
     get_task_by_id,
     get_today_tasks,
     get_upcoming_tasks,
@@ -536,3 +540,199 @@ class TestGetUpcomingTasks:
         tasks = get_upcoming_tasks(db=db_session, user=user, days=7)
         assert len(tasks) == 1
         assert tasks[0].title == "My upcoming"
+
+
+# ===========================================================================
+# Phase 4: complete_task
+# ===========================================================================
+
+class TestCompleteTask:
+    def test_complete_pending_task(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Do laundry", due_at_utc=_future_utc())
+        db_session.commit()
+
+        completed = complete_task(db=db_session, task=task)
+        db_session.commit()
+
+        assert completed.status == TaskStatus.completed
+        assert completed.completed_at is not None
+        assert completed.completed_at.tzinfo is not None
+
+    def test_complete_already_completed_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Already done", due_at_utc=_future_utc())
+        complete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="already completed"):
+            complete_task(db=db_session, task=task)
+
+    def test_complete_cancelled_task_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Cancelled item", due_at_utc=_future_utc())
+        delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="cancelled"):
+            complete_task(db=db_session, task=task)
+
+
+# ===========================================================================
+# Phase 4: delete_task
+# ===========================================================================
+
+class TestDeleteTask:
+    def test_soft_delete_sets_status_cancelled(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Delete me", due_at_utc=_future_utc())
+        db_session.commit()
+
+        deleted = delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        assert deleted.status == TaskStatus.cancelled
+        # Row still in DB
+        retrieved = db_session.query(Task).filter_by(id=task.id).first()
+        assert retrieved is not None
+        assert retrieved.status == TaskStatus.cancelled
+
+    def test_delete_already_cancelled_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Double cancel", due_at_utc=_future_utc())
+        delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="already cancelled"):
+            delete_task(db=db_session, task=task)
+
+    def test_hard_delete_removes_row(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Hard delete me", due_at_utc=_future_utc())
+        db_session.commit()
+        task_id = task.id
+
+        delete_task(db=db_session, task=task, hard_delete=True)
+        db_session.commit()
+
+        retrieved = db_session.query(Task).filter_by(id=task_id).first()
+        assert retrieved is None
+
+
+# ===========================================================================
+# Phase 4: edit_task
+# ===========================================================================
+
+class TestEditTask:
+    def test_edit_title_only(self, db_session: Session, user: User) -> None:
+        due = _future_utc(2)
+        task = create_task(db=db_session, user=user, title="Original title", due_at_utc=due, priority=TaskPriority.low)
+        db_session.commit()
+
+        edited = edit_task(db=db_session, task=task, title="New title")
+        db_session.commit()
+
+        assert edited.title == "New title"
+        assert edited.due_at == due
+        assert edited.priority == TaskPriority.low
+
+    def test_edit_due_at_only(self, db_session: Session, user: User) -> None:
+        due_orig = _future_utc(1)
+        due_new = _future_utc(5)
+        task = create_task(db=db_session, user=user, title="Keep title", due_at_utc=due_orig, priority=TaskPriority.medium)
+        task.reminder_sent = True
+        db_session.commit()
+
+        edited = edit_task(db=db_session, task=task, due_at_utc=due_new)
+        db_session.commit()
+
+        assert edited.title == "Keep title"
+        assert edited.due_at == due_new
+        assert edited.reminder_sent is False  # reset on due_at change
+
+    def test_edit_priority_only(self, db_session: Session, user: User) -> None:
+        due = _future_utc()
+        task = create_task(db=db_session, user=user, title="Keep title", due_at_utc=due, priority=TaskPriority.low)
+        db_session.commit()
+
+        edited = edit_task(db=db_session, task=task, priority=TaskPriority.high)
+        db_session.commit()
+
+        assert edited.priority == TaskPriority.high
+        assert edited.title == "Keep title"
+
+    def test_edit_multiple_fields(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Orig", due_at_utc=_future_utc(1), priority=TaskPriority.low)
+        db_session.commit()
+
+        new_due = _future_utc(3)
+        edited = edit_task(db=db_session, task=task, title="Updated", due_at_utc=new_due, priority=TaskPriority.high)
+        db_session.commit()
+
+        assert edited.title == "Updated"
+        assert edited.due_at == new_due
+        assert edited.priority == TaskPriority.high
+
+    def test_edit_empty_title_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Valid", due_at_utc=_future_utc())
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            edit_task(db=db_session, task=task, title="   ")
+
+    def test_edit_title_too_long_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Valid", due_at_utc=_future_utc())
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="exceeds maximum length"):
+            edit_task(db=db_session, task=task, title="X" * (MAX_TITLE_LENGTH + 1))
+
+    def test_edit_naive_datetime_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Valid", due_at_utc=_future_utc())
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="timezone-aware"):
+            edit_task(db=db_session, task=task, due_at_utc=datetime(2026, 12, 1, 10, 0))
+
+    def test_edit_cancelled_task_raises(self, db_session: Session, user: User) -> None:
+        task = create_task(db=db_session, user=user, title="Valid", due_at_utc=_future_utc())
+        delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="cancelled"):
+            edit_task(db=db_session, task=task, title="Revived")
+
+
+# ===========================================================================
+# Phase 4: get_pending_tasks
+# ===========================================================================
+
+class TestGetPendingTasks:
+    def test_empty_pending_tasks(self, db_session: Session, user: User) -> None:
+        tasks = get_pending_tasks(db=db_session, user=user)
+        assert tasks == []
+
+    def test_filters_completed_and_cancelled(self, db_session: Session, user: User) -> None:
+        t_pending = create_task(db=db_session, user=user, title="Pending", due_at_utc=_future_utc(1))
+        t_done = create_task(db=db_session, user=user, title="Done", due_at_utc=_future_utc(2))
+        complete_task(db=db_session, task=t_done)
+        t_cancelled = create_task(db=db_session, user=user, title="Cancel", due_at_utc=_future_utc(3))
+        delete_task(db=db_session, task=t_cancelled)
+        db_session.commit()
+
+        pending = get_pending_tasks(db=db_session, user=user)
+        assert len(pending) == 1
+        assert pending[0].id == t_pending.id
+
+    def test_chronological_ordering(self, db_session: Session, user: User) -> None:
+        t2 = create_task(db=db_session, user=user, title="Later", due_at_utc=_future_utc(4))
+        t1 = create_task(db=db_session, user=user, title="Earlier", due_at_utc=_future_utc(1))
+        db_session.commit()
+
+        pending = get_pending_tasks(db=db_session, user=user)
+        assert [t.title for t in pending] == ["Earlier", "Later"]
+
+    def test_user_ownership_isolation(
+        self, db_session: Session, user: User, other_user: User
+    ) -> None:
+        create_task(db=db_session, user=other_user, title="Other's pending", due_at_utc=_future_utc(1))
+        create_task(db=db_session, user=user, title="My pending", due_at_utc=_future_utc(2))
+        db_session.commit()
+
+        my_pending = get_pending_tasks(db=db_session, user=user)
+        assert len(my_pending) == 1
+        assert my_pending[0].title == "My pending"

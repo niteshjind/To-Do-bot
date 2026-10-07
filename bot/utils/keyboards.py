@@ -30,6 +30,16 @@ CB_UPCOMING_REFRESH = "view:upcoming_refresh"
 CB_VIEW_TODAY = "view:today"
 CB_VIEW_UPCOMING = "view:upcoming"
 
+# Phase 4: Task actions callbacks (/done, /edit, /delete)
+CB_DONE_CANCEL = "done:cancel"
+CB_DELETE_CANCEL = "delete:cancel"
+CB_EDIT_CANCEL = "edit:cancel"
+CB_EDIT_SAVE = "edit:save"
+CB_EDIT_FIELD_TITLE = "edit:field:title"
+CB_EDIT_FIELD_DATE = "edit:field:date"
+CB_EDIT_FIELD_TIME = "edit:field:time"
+CB_EDIT_FIELD_PRIORITY = "edit:field:priority"
+
 # Priority display helpers
 PRIORITY_ICONS = {
     "low": "🟢",
@@ -106,6 +116,96 @@ def upcoming_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔄 Refresh", callback_data=CB_UPCOMING_REFRESH),
                 InlineKeyboardButton("📅 View Today", callback_data=CB_VIEW_TODAY),
+            ]
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Task Action Keyboard Builders
+# ---------------------------------------------------------------------------
+
+def task_selection_keyboard(
+    tasks,
+    callback_prefix: str,
+    cancel_callback: str,
+    tz_string: str,
+) -> InlineKeyboardMarkup:
+    """
+    Build an inline keyboard listing tasks for user selection.
+    Each row has one task button: [#{id} {title[:20]} ({time})].
+    Bottom row has [❌ Cancel].
+    """
+    from bot.utils.datetime_utils import format_time_only
+
+    buttons = []
+    for t in tasks:
+        p_icon = PRIORITY_ICONS.get(t.priority.value, "⚪")
+        time_str = format_time_only(t.due_at, tz_string) if t.due_at else ""
+        short_title = t.title[:22] + "…" if len(t.title) > 22 else t.title
+        label = f"#{t.id} {p_icon} {short_title}"
+        if time_str:
+            label += f" ({time_str})"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"{callback_prefix}:{t.id}")])
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=cancel_callback)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def confirm_delete_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for confirming task deletion.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗑️ Yes, Delete", callback_data=f"delete:confirm:{task_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=CB_DELETE_CANCEL)],
+        ]
+    )
+
+
+def edit_fields_keyboard() -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for selecting which field of a task to edit.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📝 Title", callback_data=CB_EDIT_FIELD_TITLE),
+                InlineKeyboardButton("🏷️ Priority", callback_data=CB_EDIT_FIELD_PRIORITY),
+            ],
+            [
+                InlineKeyboardButton("📅 Date", callback_data=CB_EDIT_FIELD_DATE),
+                InlineKeyboardButton("⏰ Time", callback_data=CB_EDIT_FIELD_TIME),
+            ],
+            [
+                InlineKeyboardButton("❌ Cancel", callback_data=CB_EDIT_CANCEL),
+            ],
+        ]
+    )
+
+
+def confirm_edit_keyboard() -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for confirming task edits.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Save Changes", callback_data=CB_EDIT_SAVE)],
+            [InlineKeyboardButton("❌ Cancel", callback_data=CB_EDIT_CANCEL)],
+        ]
+    )
+
+
+def action_nav_keyboard() -> InlineKeyboardMarkup:
+    """
+    Navigation buttons shown after an action succeeds.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📅 Today", callback_data=CB_VIEW_TODAY),
+                InlineKeyboardButton("📆 Upcoming", callback_data=CB_VIEW_UPCOMING),
             ]
         ]
     )
