@@ -19,8 +19,9 @@ from typing import Optional
 
 from sqlalchemy.orm import Session, joinedload
 
+from bot.config import settings
 from bot.database.models import Task, TaskPriority, TaskStatus, User
-from bot.utils.datetime_utils import get_day_boundaries_utc
+from bot.utils.datetime_utils import calculate_next_occurrence, get_day_boundaries_utc
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ def create_task(
     title: str,
     due_at_utc: datetime,
     priority: TaskPriority = TaskPriority.medium,
+    recurrence: Optional[str] = None,
 ) -> Task:
     """
     Create and persist a new pending task for the given user.
@@ -48,6 +50,7 @@ def create_task(
         title:       Task description. Stripped of leading/trailing whitespace.
         due_at_utc:  Reminder datetime as a UTC-aware datetime.
         priority:    Task priority (default: medium).
+        recurrence:  Optional recurrence rule ("daily", "weekly", "monthly", or None).
 
     Returns:
         The newly created :class:`Task` ORM instance with ``id`` set.
@@ -55,6 +58,7 @@ def create_task(
     Raises:
         ValueError: If ``title`` is empty or exceeds ``MAX_TITLE_LENGTH``.
         ValueError: If ``due_at_utc`` is not timezone-aware.
+        ValueError: If ``recurrence`` is invalid.
     """
     # --- Input validation (defence-in-depth; handlers also validate) ---
     title = title.strip()
@@ -69,6 +73,8 @@ def create_task(
             "due_at_utc must be a timezone-aware datetime. "
             "Use combine_to_utc() from datetime_utils to create it."
         )
+    if recurrence is not None and recurrence not in {"daily", "weekly", "monthly"}:
+        raise ValueError(f"Invalid recurrence: {recurrence!r}")
 
     task = Task(
         user_id=user.id,
@@ -76,6 +82,7 @@ def create_task(
         due_at=due_at_utc,
         priority=priority,
         status=TaskStatus.pending,
+        recurrence=recurrence,
         reminder_sent=False,
     )
     db.add(task)
@@ -188,9 +195,14 @@ def get_task_by_id(
     )
 
 
-def complete_task(db: Session, task: Task) -> Task:
+def complete_task(
+    db: Session,
+    task: Task,
+    now_utc: Optional[datetime] = None,
+) -> Task:
     """
     Mark a task as completed and record completed_at in UTC.
+    If the task is recurring, automatically schedule the next occurrence.
 
     Raises:
         ValueError: If the task is already completed or cancelled.
@@ -200,11 +212,77 @@ def complete_task(db: Session, task: Task) -> Task:
     if task.status == TaskStatus.cancelled:
         raise ValueError("Task is cancelled and cannot be completed.")
 
-    task.status = TaskStatus.completed
-    task.completed_at = datetime.now(timezone.utc)
-    db.flush()
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        raise ValueError("now_utc must be a timezone-aware datetime.")
 
+    task.status = TaskStatus.completed
+    task.completed_at = now_utc
+    task.next_occurrence = None
+
+    # If task has a recurrence rule, schedule the next occurrence
+    if task.recurrence and task.due_at:
+        user_tz = task.user.timezone if task.user else settings.TIMEZONE
+        next_due_utc = calculate_next_occurrence(
+            base_dt_utc=task.due_at,
+            recurrence=task.recurrence,
+            tz_string=user_tz,
+            after_utc=now_utc,
+        )
+        next_task = Task(
+            user_id=task.user_id,
+            title=task.title,
+            status=TaskStatus.pending,
+            priority=task.priority,
+            due_at=next_due_utc,
+            recurrence=task.recurrence,
+            reminder_sent=False,
+            created_at=now_utc,
+            updated_at=now_utc,
+        )
+        db.add(next_task)
+        db.flush()
+        task.next_occurrence = next_task
+        logger.info(
+            "Scheduled next recurring task: id=%s parent_id=%s due_at=%s",
+            next_task.id,
+            task.id,
+            next_due_utc.isoformat(),
+        )
+
+    db.flush()
     logger.info("Task completed: id=%s user_id=%s", task.id, task.user_id)
+    return task
+
+
+def snooze_task(
+    db: Session,
+    task: Task,
+    new_due_at_utc: datetime,
+) -> Task:
+    """
+    Snooze a pending task to a new reminder time.
+
+    Updates due_at, records snoozed_until, and resets reminder_sent to False
+    so the scheduler will pick it up again at the new due time.
+
+    Raises:
+        ValueError: If task is completed or cancelled.
+        ValueError: If new_due_at_utc is not timezone-aware.
+    """
+    if task.status == TaskStatus.completed:
+        raise ValueError("Cannot snooze a completed task.")
+    if task.status == TaskStatus.cancelled:
+        raise ValueError("Cannot snooze a cancelled task.")
+    if new_due_at_utc.tzinfo is None:
+        raise ValueError("new_due_at_utc must be a timezone-aware datetime.")
+
+    task.due_at = new_due_at_utc
+    task.snoozed_until = new_due_at_utc
+    task.reminder_sent = False
+    db.flush()
+    logger.info("Task snoozed: id=%s new_due=%s", task.id, new_due_at_utc.isoformat())
     return task
 
 
@@ -232,12 +310,16 @@ def delete_task(db: Session, task: Task, hard_delete: bool = False) -> Task:
 cancel_task = delete_task
 
 
+_UNSET = object()
+
+
 def edit_task(
     db: Session,
     task: Task,
     title: Optional[str] = None,
     due_at_utc: Optional[datetime] = None,
     priority: Optional[TaskPriority] = None,
+    recurrence: Optional[object] = _UNSET,
 ) -> Task:
     """
     Edit specific fields of an existing task without altering untouched fields.
@@ -246,6 +328,7 @@ def edit_task(
         ValueError: If title is empty or exceeds MAX_TITLE_LENGTH.
         ValueError: If due_at_utc is naive.
         ValueError: If task is cancelled.
+        ValueError: If recurrence is invalid.
     """
     if task.status == TaskStatus.cancelled:
         raise ValueError("Cannot edit a cancelled task.")
@@ -269,6 +352,11 @@ def edit_task(
 
     if priority is not None:
         task.priority = priority
+
+    if recurrence is not _UNSET:
+        if recurrence is not None and recurrence not in {"daily", "weekly", "monthly"}:
+            raise ValueError(f"Invalid recurrence: {recurrence!r}")
+        task.recurrence = recurrence  # type: ignore[assignment]
 
     db.flush()
     logger.info("Task edited: id=%s user_id=%s", task.id, task.user_id)

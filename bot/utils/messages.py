@@ -94,6 +94,10 @@ ADD_TASK_ASK_TIME = (
 )
 
 ADD_TASK_ASK_PRIORITY = "🏷️ <b>Choose the priority for this task:</b>"
+ADD_TASK_ASK_RECURRENCE = (
+    "🔁 <b>Does this task repeat?</b>\n\n"
+    "Choose a recurrence schedule, or tap 'No Recurrence':"
+)
 
 # --- Confirmation ---
 
@@ -101,7 +105,8 @@ ADD_TASK_CONFIRM = (
     "📋 <b>Review your task</b>\n\n"
     "📝 <b>Title:</b> {title}\n"
     "⏰ <b>Reminder:</b> {due_display}\n"
-    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n\n"
     "Shall I save this task?"
 )
 
@@ -112,6 +117,7 @@ ADD_TASK_SUCCESS = (
     "📝 {title}\n"
     "⏰ <b>Reminder:</b> {due_display}\n"
     "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n"
     "📌 <b>Task ID:</b> #{task_id}\n\n"
     "I'll send you a reminder at the scheduled time!"
 )
@@ -181,6 +187,12 @@ UPCOMING_EMPTY = (
 DONE_NO_PENDING = "🎉 <b>All caught up!</b>\n\nYou have no pending tasks to complete."
 DONE_SELECT_TASK = "✅ <b>Mark Task as Completed</b>\n\nSelect a task below:"
 DONE_SUCCESS = "✅ <b>Task Completed!</b>\n\n<s>{title}</s>\n\nWell done! 🎉"
+DONE_SUCCESS_RECURRING = (
+    "✅ <b>Task Completed!</b>\n\n"
+    "<s>{title}</s>\n\n"
+    "🔁 <b>Next occurrence scheduled:</b> {next_due_display}\n\n"
+    "Well done! 🎉"
+)
 DONE_ALREADY_COMPLETED = "ℹ️ Task #{task_id} is already completed."
 DONE_ALREADY_CANCELLED = "⚠️ Task #{task_id} is cancelled and cannot be completed."
 DONE_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
@@ -206,7 +218,8 @@ EDIT_MENU = (
     "✏️ <b>Editing Task #{task_id}</b>\n\n"
     "📝 <b>Title:</b> {title}\n"
     "⏰ <b>Reminder:</b> {due_display}\n"
-    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n\n"
     "What would you like to edit?"
 )
 EDIT_ASK_TITLE = "📝 <b>Edit Title</b>\n\nCurrent: <i>{current_title}</i>\n\nPlease enter the new title:"
@@ -221,11 +234,17 @@ EDIT_ASK_TIME = (
     "Please enter the new time (<code>HH:MM</code> 24-hour):"
 )
 EDIT_ASK_PRIORITY = "🏷️ <b>Edit Priority</b>\n\nCurrent: {priority_icon} {priority_label}\n\nSelect the new priority:"
+EDIT_ASK_RECURRENCE = (
+    "🔁 <b>Edit Recurrence</b>\n\n"
+    "Current: <b>{current_recurrence}</b>\n\n"
+    "Select the new recurrence schedule:"
+)
 EDIT_CONFIRM = (
     "📋 <b>Review Changes for Task #{task_id}</b>\n\n"
     "📝 <b>Title:</b> {title}\n"
     "⏰ <b>Reminder:</b> {due_display}\n"
-    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n\n"
+    "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n\n"
     "Save these changes?"
 )
 EDIT_SUCCESS = (
@@ -233,6 +252,7 @@ EDIT_SUCCESS = (
     "📝 {title}\n"
     "⏰ <b>Reminder:</b> {due_display}\n"
     "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n"
     "📌 <b>Task ID:</b> #{task_id}"
 )
 EDIT_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
@@ -240,7 +260,7 @@ EDIT_CANCELLED = "❌ Edit cancelled. No changes were made."
 
 
 # ===========================================================================
-# Phase 5 — Reminder Notifications
+# Phase 5 & 6 — Reminder & Snooze Notifications
 # ===========================================================================
 
 REMINDER_NOTIFICATION = (
@@ -248,6 +268,17 @@ REMINDER_NOTIFICATION = (
     "📌 <b>{title}</b>\n"
     "⏰ <b>Due:</b> {due_display}\n"
     "🏷️ <b>Priority:</b> {priority_icon} {priority_label}\n"
+    "🔁 <b>Repeat:</b> {recurrence_label}\n"
     "🆔 <b>Task ID:</b> #{task_id}"
 )
+
+SNOOZE_SUCCESS = (
+    "😴 <b>Reminder Snoozed</b>\n\n"
+    "📌 <b>{title}</b>\n"
+    "⏰ <b>New reminder:</b> {due_display}\n\n"
+    "<i>We'll remind you then!</i>"
+)
+SNOOZE_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
+SNOOZE_ALREADY_COMPLETED = "ℹ️ Task #{task_id} is already completed and cannot be snoozed."
+SNOOZE_ALREADY_CANCELLED = "⚠️ Task #{task_id} is deleted and cannot be snoozed."
 

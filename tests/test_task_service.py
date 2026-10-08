@@ -27,6 +27,7 @@ from bot.services.task_service import (
     get_today_tasks,
     get_upcoming_tasks,
     mark_reminder_sent,
+    snooze_task,
 )
 from bot.services.user_service import get_or_create_user
 
@@ -850,4 +851,220 @@ class TestMarkReminderSent:
         # Verify persisted in database
         refreshed = db_session.query(Task).filter_by(id=task.id).one()
         assert refreshed.reminder_sent is True
+
+
+# ===========================================================================
+# Phase 6: snooze_task
+# ===========================================================================
+
+class TestSnoozeTask:
+    def test_snooze_pending_task_success(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Snooze me", due_at_utc=now)
+        task.reminder_sent = True
+        db_session.commit()
+
+        new_due = now + timedelta(minutes=10)
+        snoozed = snooze_task(db=db_session, task=task, new_due_at_utc=new_due)
+        db_session.commit()
+
+        assert snoozed.due_at == new_due
+        assert snoozed.snoozed_until == new_due
+        assert snoozed.reminder_sent is False
+
+        # Verify persisted
+        refreshed = db_session.query(Task).filter_by(id=task.id).one()
+        assert refreshed.due_at == new_due
+        assert refreshed.snoozed_until == new_due
+        assert refreshed.reminder_sent is False
+
+    def test_snoozed_task_picked_up_by_scheduler_when_due(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Snooze test", due_at_utc=now - timedelta(minutes=5))
+        task.reminder_sent = True
+        db_session.commit()
+
+        # Not eligible while reminder_sent is True
+        assert len(get_due_tasks(db=db_session, now_utc=now)) == 0
+
+        # Snooze 10 minutes into the future
+        snooze_task(db=db_session, task=task, new_due_at_utc=now + timedelta(minutes=10))
+        db_session.commit()
+
+        # At current time 'now', still not eligible because due_at is now + 10m
+        assert len(get_due_tasks(db=db_session, now_utc=now)) == 0
+
+        # Once time reaches now + 11m, it becomes eligible
+        future_time = now + timedelta(minutes=11)
+        due = get_due_tasks(db=db_session, now_utc=future_time)
+        assert len(due) == 1
+        assert due[0].id == task.id
+
+    def test_snooze_completed_task_raises(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Done", due_at_utc=now)
+        complete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="Cannot snooze a completed task"):
+            snooze_task(db=db_session, task=task, new_due_at_utc=now + timedelta(minutes=10))
+
+    def test_snooze_cancelled_task_raises(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Cancelled", due_at_utc=now)
+        delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="Cannot snooze a cancelled task"):
+            snooze_task(db=db_session, task=task, new_due_at_utc=now + timedelta(minutes=10))
+
+    def test_snooze_naive_datetime_raises(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Naive", due_at_utc=now)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            snooze_task(db=db_session, task=task, new_due_at_utc=datetime(2026, 10, 7, 12, 0))
+
+
+# ===========================================================================
+# Phase 6: Recurring Tasks
+# ===========================================================================
+
+class TestRecurringTasks:
+    def test_create_task_with_recurrence(self, db_session: Session, user: User) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(
+            db=db_session,
+            user=user,
+            title="Drink water",
+            due_at_utc=now,
+            recurrence="daily",
+        )
+        db_session.commit()
+
+        assert task.recurrence == "daily"
+        refreshed = db_session.query(Task).filter_by(id=task.id).one()
+        assert refreshed.recurrence == "daily"
+
+    def test_create_task_invalid_recurrence_raises(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        with pytest.raises(ValueError, match="Invalid recurrence"):
+            create_task(
+                db=db_session,
+                user=user,
+                title="Invalid rec",
+                due_at_utc=now,
+                recurrence="yearly",
+            )
+
+    def test_complete_recurring_task_schedules_next(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(
+            db=db_session,
+            user=user,
+            title="Daily review",
+            due_at_utc=now,
+            priority=TaskPriority.high,
+            recurrence="daily",
+        )
+        db_session.commit()
+
+        completed = complete_task(db=db_session, task=task, now_utc=now)
+        db_session.commit()
+
+        assert completed.status == TaskStatus.completed
+        assert completed.completed_at == now
+        assert hasattr(completed, "next_occurrence")
+        assert completed.next_occurrence is not None
+
+        next_task = completed.next_occurrence
+        assert next_task.title == "Daily review"
+        assert next_task.status == TaskStatus.pending
+        assert next_task.priority == TaskPriority.high
+        assert next_task.recurrence == "daily"
+        assert next_task.reminder_sent is False
+        assert next_task.due_at > now
+        assert next_task.id != completed.id
+
+        # Total tasks in DB: 2 (1 completed, 1 pending)
+        all_tasks = db_session.query(Task).filter_by(user_id=user.id).all()
+        assert len(all_tasks) == 2
+
+    def test_complete_non_recurring_task_does_not_schedule_next(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(
+            db=db_session,
+            user=user,
+            title="One time task",
+            due_at_utc=now,
+            recurrence=None,
+        )
+        db_session.commit()
+
+        completed = complete_task(db=db_session, task=task, now_utc=now)
+        db_session.commit()
+
+        assert completed.status == TaskStatus.completed
+        assert getattr(completed, "next_occurrence", None) is None
+        all_tasks = db_session.query(Task).filter_by(user_id=user.id).all()
+        assert len(all_tasks) == 1
+
+    def test_delete_recurring_task_does_not_schedule_next(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(
+            db=db_session,
+            user=user,
+            title="Recurring to cancel",
+            due_at_utc=now,
+            recurrence="weekly",
+        )
+        db_session.commit()
+
+        cancelled = delete_task(db=db_session, task=task)
+        db_session.commit()
+
+        assert cancelled.status == TaskStatus.cancelled
+        all_tasks = db_session.query(Task).filter_by(user_id=user.id).all()
+        assert len(all_tasks) == 1
+
+    def test_edit_task_updates_recurrence(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(
+            db=db_session,
+            user=user,
+            title="Gym",
+            due_at_utc=now,
+            recurrence=None,
+        )
+        db_session.commit()
+
+        # Update recurrence to monthly
+        edit_task(db=db_session, task=task, recurrence="monthly")
+        db_session.commit()
+        assert task.recurrence == "monthly"
+
+        # Update recurrence back to None
+        edit_task(db=db_session, task=task, recurrence=None)
+        db_session.commit()
+        assert task.recurrence is None
+
+    def test_edit_task_invalid_recurrence_raises(
+        self, db_session: Session, user: User
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        task = create_task(db=db_session, user=user, title="Gym", due_at_utc=now)
+        with pytest.raises(ValueError, match="Invalid recurrence"):
+            edit_task(db=db_session, task=task, recurrence="hourly")
+
 

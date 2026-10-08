@@ -39,6 +39,20 @@ CB_EDIT_FIELD_TITLE = "edit:field:title"
 CB_EDIT_FIELD_DATE = "edit:field:date"
 CB_EDIT_FIELD_TIME = "edit:field:time"
 CB_EDIT_FIELD_PRIORITY = "edit:field:priority"
+CB_EDIT_FIELD_RECURRENCE = "edit:field:recurrence"
+
+# Phase 6: Recurrence selection callbacks
+CB_REC_NONE = "rec:none"
+CB_REC_DAILY = "rec:daily"
+CB_REC_WEEKLY = "rec:weekly"
+CB_REC_MONTHLY = "rec:monthly"
+
+# Phase 6: Snooze options
+CB_SNOOZE_10M = "10m"
+CB_SNOOZE_30M = "30m"
+CB_SNOOZE_1H = "1h"
+CB_SNOOZE_TOMORROW = "tomorrow"
+
 
 # Priority display helpers
 PRIORITY_ICONS = {
@@ -179,7 +193,30 @@ def edit_fields_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⏰ Time", callback_data=CB_EDIT_FIELD_TIME),
             ],
             [
+                InlineKeyboardButton("🔁 Recurrence", callback_data=CB_EDIT_FIELD_RECURRENCE),
+            ],
+            [
                 InlineKeyboardButton("❌ Cancel", callback_data=CB_EDIT_CANCEL),
+            ],
+        ]
+    )
+
+
+def recurrence_keyboard() -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for choosing task recurrence frequency.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("❌ No Recurrence", callback_data=CB_REC_NONE),
+            ],
+            [
+                InlineKeyboardButton("🔁 Daily", callback_data=CB_REC_DAILY),
+                InlineKeyboardButton("🔁 Weekly", callback_data=CB_REC_WEEKLY),
+            ],
+            [
+                InlineKeyboardButton("🔁 Monthly", callback_data=CB_REC_MONTHLY),
             ],
         ]
     )
@@ -214,13 +251,22 @@ def action_nav_keyboard() -> InlineKeyboardMarkup:
 def reminder_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """
     Inline keyboard attached to an automated reminder notification.
-    Provides a quick 'Mark Done' action.
+    Provides quick completion and snooze options.
     """
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("✅ Mark Done", callback_data=f"done:select:{task_id}"),
-            ]
+            ],
+            [
+                InlineKeyboardButton("😴 10 min", callback_data=f"snooze:{task_id}:{CB_SNOOZE_10M}"),
+                InlineKeyboardButton("😴 30 min", callback_data=f"snooze:{task_id}:{CB_SNOOZE_30M}"),
+            ],
+            [
+                InlineKeyboardButton("😴 1 hour", callback_data=f"snooze:{task_id}:{CB_SNOOZE_1H}"),
+                InlineKeyboardButton("📅 Tomorrow", callback_data=f"snooze:{task_id}:{CB_SNOOZE_TOMORROW}"),
+            ],
         ]
     )
+
 

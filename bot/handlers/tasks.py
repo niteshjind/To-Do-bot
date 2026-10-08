@@ -25,7 +25,8 @@ Design rules:
 
 import html
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
+from typing import Optional
 
 from telegram import Update
 from telegram.ext import (
@@ -39,19 +40,22 @@ from telegram.ext import (
 
 from bot.config import settings
 from bot.database.database import get_db
-from bot.database.models import Task, TaskPriority, TaskStatus
+from bot.database.models import RECURRENCE_LABELS, Task, TaskPriority, TaskRecurrence, TaskStatus
 from bot.services.task_service import (
+    _UNSET,
+    complete_task,
     create_task,
     delete_task,
     edit_task,
-    complete_task,
     get_pending_tasks,
     get_task_by_id,
     get_today_tasks,
     get_upcoming_tasks,
+    snooze_task,
 )
 from bot.services.user_service import get_or_create_user, get_user_by_telegram_id
 from bot.utils.datetime_utils import (
+    calculate_snooze_datetime,
     combine_to_utc,
     current_time_display,
     example_date_string,
@@ -72,12 +76,17 @@ from bot.utils.keyboards import (
     CB_EDIT_CANCEL,
     CB_EDIT_FIELD_DATE,
     CB_EDIT_FIELD_PRIORITY,
+    CB_EDIT_FIELD_RECURRENCE,
     CB_EDIT_FIELD_TIME,
     CB_EDIT_FIELD_TITLE,
     CB_EDIT_SAVE,
     CB_PRIORITY_HIGH,
     CB_PRIORITY_LOW,
     CB_PRIORITY_MEDIUM,
+    CB_REC_DAILY,
+    CB_REC_MONTHLY,
+    CB_REC_NONE,
+    CB_REC_WEEKLY,
     CB_TODAY_REFRESH,
     CB_UPCOMING_REFRESH,
     CB_VIEW_TODAY,
@@ -90,6 +99,7 @@ from bot.utils.keyboards import (
     confirm_task_keyboard,
     edit_fields_keyboard,
     priority_keyboard,
+    recurrence_keyboard,
     task_selection_keyboard,
     today_keyboard,
     upcoming_keyboard,
@@ -97,6 +107,7 @@ from bot.utils.keyboards import (
 from bot.utils.messages import (
     ADD_TASK_ASK_DATE,
     ADD_TASK_ASK_PRIORITY,
+    ADD_TASK_ASK_RECURRENCE,
     ADD_TASK_ASK_TIME,
     ADD_TASK_CANCELLED,
     ADD_TASK_CONFIRM,
@@ -115,8 +126,10 @@ from bot.utils.messages import (
     DONE_NO_PENDING,
     DONE_SELECT_TASK,
     DONE_SUCCESS,
+    DONE_SUCCESS_RECURRING,
     EDIT_ASK_DATE,
     EDIT_ASK_PRIORITY,
+    EDIT_ASK_RECURRENCE,
     EDIT_ASK_TIME,
     EDIT_ASK_TITLE,
     EDIT_CANCELLED,
@@ -132,6 +145,10 @@ from bot.utils.messages import (
     ERR_TITLE_EMPTY,
     ERR_TITLE_TOO_LONG,
     ERR_USE_BUTTONS,
+    SNOOZE_ALREADY_CANCELLED,
+    SNOOZE_ALREADY_COMPLETED,
+    SNOOZE_NOT_FOUND,
+    SNOOZE_SUCCESS,
     TODAY_EMPTY,
     TODAY_HEADER,
     TODAY_PROGRESS,
@@ -145,7 +162,7 @@ logger = logging.getLogger(__name__)
 # ConversationHandler state identifiers
 # ---------------------------------------------------------------------------
 
-ASK_TITLE, ASK_DATE, ASK_TIME, ASK_PRIORITY, CONFIRM = range(5)
+ASK_TITLE, ASK_DATE, ASK_TIME, ASK_PRIORITY, ASK_RECURRENCE, CONFIRM = range(6)
 
 # ---------------------------------------------------------------------------
 # context.user_data keys — prefixed with "add_" to avoid collisions
@@ -155,9 +172,10 @@ UD_TITLE = "add_title"
 UD_DATE = "add_date"
 UD_TIME = "add_time"
 UD_PRIORITY = "add_priority"
+UD_RECURRENCE = "add_recurrence"
 UD_TIMEZONE = "add_timezone"      # Cached at conversation start; avoids repeat DB calls
 
-_ALL_ADD_KEYS = [UD_TITLE, UD_DATE, UD_TIME, UD_PRIORITY, UD_TIMEZONE]
+_ALL_ADD_KEYS = [UD_TITLE, UD_DATE, UD_TIME, UD_PRIORITY, UD_RECURRENCE, UD_TIMEZONE]
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -339,11 +357,10 @@ async def priority_text_guard(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def receive_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Store the selected priority and show the full task confirmation summary.
+    Store the selected priority and prompt for recurrence schedule.
 
     Triggered by a CallbackQuery from the priority inline keyboard.
-    Edits the keyboard message to show the confirmation instead of
-    adding a new message (cleaner UX).
+    Edits the keyboard message to ask for recurrence schedule.
     """
     query = update.callback_query
     await query.answer()  # Dismiss the loading spinner on the button
@@ -356,15 +373,57 @@ async def receive_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     context.user_data[UD_PRIORITY] = priority  # type: ignore[index]
 
+    await query.edit_message_text(
+        ADD_TASK_ASK_RECURRENCE,
+        parse_mode="HTML",
+        reply_markup=recurrence_keyboard(),
+    )
+    return ASK_RECURRENCE
+
+
+# ---------------------------------------------------------------------------
+# Step 4b — Recurrence handling (inline keyboard callback & text guard)
+# ---------------------------------------------------------------------------
+
+_RECURRENCE_MAP: dict[str, Optional[str]] = {
+    CB_REC_NONE: None,
+    CB_REC_DAILY: TaskRecurrence.daily.value,
+    CB_REC_WEEKLY: TaskRecurrence.weekly.value,
+    CB_REC_MONTHLY: TaskRecurrence.monthly.value,
+}
+
+
+async def recurrence_text_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Politely redirect if the user types text instead of tapping a recurrence button."""
+    await update.message.reply_text(ERR_USE_BUTTONS)
+    return ASK_RECURRENCE
+
+
+async def receive_recurrence(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Store the selected recurrence schedule and show the full task confirmation summary.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    if query.data not in _RECURRENCE_MAP:
+        await query.message.reply_text(ERR_USE_BUTTONS)
+        return ASK_RECURRENCE
+
+    recurrence_val = _RECURRENCE_MAP[query.data]
+    context.user_data[UD_RECURRENCE] = recurrence_val  # type: ignore[index]
+
     # Build confirmation display using cached values
     tz: str = context.user_data[UD_TIMEZONE]  # type: ignore[index]
     title: str = context.user_data[UD_TITLE]  # type: ignore[index]
     task_date: date = context.user_data[UD_DATE]  # type: ignore[index]
     task_time: time = context.user_data[UD_TIME]  # type: ignore[index]
+    priority: TaskPriority = context.user_data[UD_PRIORITY]  # type: ignore[index]
 
     due_at_utc = combine_to_utc(task_date, task_time, tz)
     due_display = format_dt_local(due_at_utc, tz)
     priority_icon = PRIORITY_ICONS.get(priority.value, "⚪")
+    recurrence_label = RECURRENCE_LABELS.get(recurrence_val, "None (one-time)")
 
     await query.edit_message_text(
         ADD_TASK_CONFIRM.format(
@@ -372,6 +431,7 @@ async def receive_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             due_display=due_display,
             priority_icon=priority_icon,
             priority_label=priority.value.capitalize(),
+            recurrence_label=recurrence_label,
         ),
         parse_mode="HTML",
         reply_markup=confirm_task_keyboard(),
@@ -438,6 +498,7 @@ async def receive_confirmation(
     task_date: date = context.user_data[UD_DATE]  # type: ignore[index]
     task_time: time = context.user_data[UD_TIME]  # type: ignore[index]
     priority: TaskPriority = context.user_data[UD_PRIORITY]  # type: ignore[index]
+    recurrence: Optional[str] = context.user_data.get(UD_RECURRENCE)  # type: ignore[union-attr]
 
     due_at_utc = combine_to_utc(task_date, task_time, tz)
 
@@ -458,6 +519,7 @@ async def receive_confirmation(
                 title=title,
                 due_at_utc=due_at_utc,
                 priority=priority,
+                recurrence=recurrence,
             )
             # Read task.id and due_at inside the session before closing
             task_id = task.id
@@ -474,6 +536,7 @@ async def receive_confirmation(
 
     # Clear conversation state AFTER successful save
     priority_icon = PRIORITY_ICONS.get(priority.value, "⚪")
+    recurrence_label = RECURRENCE_LABELS.get(recurrence, "None (one-time)")
     _clear_add_state(context)
 
     await query.edit_message_text(
@@ -482,6 +545,7 @@ async def receive_confirmation(
             due_display=due_display,
             priority_icon=priority_icon,
             priority_label=priority.value.capitalize(),
+            recurrence_label=recurrence_label,
             task_id=task_id,
         ),
         parse_mode="HTML",
@@ -539,6 +603,12 @@ _add_conversation = ConversationHandler(
             CallbackQueryHandler(receive_priority, pattern="^priority:"),
             # Guard: user typed text instead of pressing a button
             MessageHandler(filters.TEXT & ~filters.COMMAND, priority_text_guard),
+        ],
+        ASK_RECURRENCE: [
+            # Inline keyboard response
+            CallbackQueryHandler(receive_recurrence, pattern="^rec:"),
+            # Guard: user typed text instead of pressing a button
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recurrence_text_guard),
         ],
         CONFIRM: [
             # Inline keyboard response
@@ -738,17 +808,20 @@ async def upcoming_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     STATE_EDIT_INPUT_DATE,
     STATE_EDIT_INPUT_TIME,
     STATE_EDIT_INPUT_PRIORITY,
+    STATE_EDIT_INPUT_RECURRENCE,
     STATE_EDIT_CONFIRM,
-) = range(10, 17)
+) = range(10, 18)
 
 # Keys for context.user_data in /edit
 UD_EDIT_TASK_ID = "edit_task_id"
 UD_EDIT_ORIG_TITLE = "edit_orig_title"
 UD_EDIT_ORIG_DUE = "edit_orig_due"
 UD_EDIT_ORIG_PRIORITY = "edit_orig_priority"
+UD_EDIT_ORIG_RECURRENCE = "edit_orig_recurrence"
 UD_EDIT_NEW_TITLE = "edit_new_title"
 UD_EDIT_NEW_DUE = "edit_new_due"
 UD_EDIT_NEW_PRIORITY = "edit_new_priority"
+UD_EDIT_NEW_RECURRENCE = "edit_new_recurrence"
 UD_EDIT_TIMEZONE = "edit_timezone"
 
 _ALL_EDIT_KEYS = [
@@ -756,9 +829,11 @@ _ALL_EDIT_KEYS = [
     UD_EDIT_ORIG_TITLE,
     UD_EDIT_ORIG_DUE,
     UD_EDIT_ORIG_PRIORITY,
+    UD_EDIT_ORIG_RECURRENCE,
     UD_EDIT_NEW_TITLE,
     UD_EDIT_NEW_DUE,
     UD_EDIT_NEW_PRIORITY,
+    UD_EDIT_NEW_RECURRENCE,
     UD_EDIT_TIMEZONE,
 ]
 
@@ -777,6 +852,13 @@ def _render_edit_confirm_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     due_at = context.user_data.get(UD_EDIT_NEW_DUE) or context.user_data[UD_EDIT_ORIG_DUE]
     priority = context.user_data.get(UD_EDIT_NEW_PRIORITY) or context.user_data[UD_EDIT_ORIG_PRIORITY]
 
+    rec_val = (
+        context.user_data[UD_EDIT_NEW_RECURRENCE]
+        if UD_EDIT_NEW_RECURRENCE in context.user_data
+        else context.user_data.get(UD_EDIT_ORIG_RECURRENCE)
+    )
+    rec_label = RECURRENCE_LABELS.get(rec_val, "None (one-time)")
+
     due_display = format_dt_local(due_at, tz) if due_at else "No reminder"
     p_icon = PRIORITY_ICONS.get(priority.value, "⚪")
 
@@ -786,6 +868,7 @@ def _render_edit_confirm_text(context: ContextTypes.DEFAULT_TYPE) -> str:
         due_display=due_display,
         priority_icon=p_icon,
         priority_label=priority.value.capitalize(),
+        recurrence_label=rec_label,
     )
 
 
@@ -821,9 +904,18 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             complete_task(db, task)
             title = task.title
+            next_task = getattr(task, "next_occurrence", None)
+            if next_task and next_task.due_at:
+                next_due_str = format_dt_local(next_task.due_at, user.timezone)
+                msg_text = DONE_SUCCESS_RECURRING.format(
+                    title=html.escape(title),
+                    next_due_display=next_due_str,
+                )
+            else:
+                msg_text = DONE_SUCCESS.format(title=html.escape(title))
 
         await update.message.reply_text(
-            DONE_SUCCESS.format(title=html.escape(title)),
+            msg_text,
             parse_mode="HTML",
             reply_markup=action_nav_keyboard(),
         )
@@ -874,9 +966,18 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         complete_task(db, task)
         title = task.title
+        next_task = getattr(task, "next_occurrence", None)
+        if next_task and next_task.due_at:
+            next_due_str = format_dt_local(next_task.due_at, user.timezone)
+            msg_text = DONE_SUCCESS_RECURRING.format(
+                title=html.escape(title),
+                next_due_display=next_due_str,
+            )
+        else:
+            msg_text = DONE_SUCCESS.format(title=html.escape(title))
 
     await query.edit_message_text(
-        DONE_SUCCESS.format(title=html.escape(title)),
+        msg_text,
         parse_mode="HTML",
         reply_markup=action_nav_keyboard(),
     )
@@ -1030,10 +1131,12 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             context.user_data[UD_EDIT_ORIG_TITLE] = task.title
             context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
             context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+            context.user_data[UD_EDIT_ORIG_RECURRENCE] = task.recurrence
             context.user_data[UD_EDIT_TIMEZONE] = user.timezone
 
             due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
             p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
+            rec_label = RECURRENCE_LABELS.get(task.recurrence, "None (one-time)")
 
         await update.message.reply_text(
             EDIT_MENU.format(
@@ -1042,6 +1145,7 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 due_display=due_display,
                 priority_icon=p_icon,
                 priority_label=task.priority.value.capitalize(),
+                recurrence_label=rec_label,
             ),
             parse_mode="HTML",
             reply_markup=edit_fields_keyboard(),
@@ -1093,10 +1197,12 @@ async def edit_select_task_callback(update: Update, context: ContextTypes.DEFAUL
         context.user_data[UD_EDIT_ORIG_TITLE] = task.title
         context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
         context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+        context.user_data[UD_EDIT_ORIG_RECURRENCE] = task.recurrence
         context.user_data[UD_EDIT_TIMEZONE] = user.timezone
 
         due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
         p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
+        rec_label = RECURRENCE_LABELS.get(task.recurrence, "None (one-time)")
 
     await query.edit_message_text(
         EDIT_MENU.format(
@@ -1105,6 +1211,7 @@ async def edit_select_task_callback(update: Update, context: ContextTypes.DEFAUL
             due_display=due_display,
             priority_icon=p_icon,
             priority_label=task.priority.value.capitalize(),
+            recurrence_label=rec_label,
         ),
         parse_mode="HTML",
         reply_markup=edit_fields_keyboard(),
@@ -1156,6 +1263,16 @@ async def edit_choose_field_callback(update: Update, context: ContextTypes.DEFAU
             reply_markup=priority_keyboard(),
         )
         return STATE_EDIT_INPUT_PRIORITY
+
+    elif data == CB_EDIT_FIELD_RECURRENCE:
+        current_rec = context.user_data.get(UD_EDIT_ORIG_RECURRENCE)
+        current_rec_label = RECURRENCE_LABELS.get(current_rec, "None (one-time)")
+        await query.edit_message_text(
+            EDIT_ASK_RECURRENCE.format(current_recurrence=current_rec_label),
+            parse_mode="HTML",
+            reply_markup=recurrence_keyboard(),
+        )
+        return STATE_EDIT_INPUT_RECURRENCE
 
     elif data == CB_EDIT_CANCEL:
         _clear_edit_state(context)
@@ -1280,6 +1397,26 @@ async def receive_edit_priority(update: Update, context: ContextTypes.DEFAULT_TY
     return STATE_EDIT_CONFIRM
 
 
+async def receive_edit_recurrence(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receive new recurrence schedule and show confirmation summary."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data not in _RECURRENCE_MAP:
+        await query.message.reply_text(ERR_USE_BUTTONS)
+        return STATE_EDIT_INPUT_RECURRENCE
+
+    recurrence_val = _RECURRENCE_MAP[query.data]
+    context.user_data[UD_EDIT_NEW_RECURRENCE] = recurrence_val
+    confirm_text = _render_edit_confirm_text(context)
+    await query.edit_message_text(
+        confirm_text,
+        parse_mode="HTML",
+        reply_markup=confirm_edit_keyboard(),
+    )
+    return STATE_EDIT_CONFIRM
+
+
 async def receive_edit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Save changes to the database or cancel edit."""
     query = update.callback_query
@@ -1303,6 +1440,11 @@ async def receive_edit_confirmation(update: Update, context: ContextTypes.DEFAUL
     new_title = context.user_data.get(UD_EDIT_NEW_TITLE)
     new_due = context.user_data.get(UD_EDIT_NEW_DUE)
     new_priority = context.user_data.get(UD_EDIT_NEW_PRIORITY)
+    new_recurrence = (
+        context.user_data[UD_EDIT_NEW_RECURRENCE]
+        if UD_EDIT_NEW_RECURRENCE in context.user_data
+        else _UNSET
+    )
 
     with get_db() as db:
         user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
@@ -1318,11 +1460,13 @@ async def receive_edit_confirmation(update: Update, context: ContextTypes.DEFAUL
             title=new_title,
             due_at_utc=new_due,
             priority=new_priority,
+            recurrence=new_recurrence,
         )
         final_title = task.title
         final_due_str = format_dt_local(task.due_at, tz) if task.due_at else "No reminder"
         p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
         p_label = task.priority.value.capitalize()
+        rec_label = RECURRENCE_LABELS.get(task.recurrence, "None (one-time)")
 
     _clear_edit_state(context)
     await query.edit_message_text(
@@ -1332,6 +1476,7 @@ async def receive_edit_confirmation(update: Update, context: ContextTypes.DEFAUL
             due_display=final_due_str,
             priority_icon=p_icon,
             priority_label=p_label,
+            recurrence_label=rec_label,
         ),
         parse_mode="HTML",
         reply_markup=action_nav_keyboard(),
@@ -1369,6 +1514,9 @@ _edit_conversation = ConversationHandler(
         STATE_EDIT_INPUT_PRIORITY: [
             CallbackQueryHandler(receive_edit_priority, pattern="^priority:"),
         ],
+        STATE_EDIT_INPUT_RECURRENCE: [
+            CallbackQueryHandler(receive_edit_recurrence, pattern="^rec:"),
+        ],
         STATE_EDIT_CONFIRM: [
             CallbackQueryHandler(receive_edit_confirmation, pattern=r"^edit:(save|cancel)$"),
         ],
@@ -1381,6 +1529,70 @@ _edit_conversation = ConversationHandler(
     per_user=True,
     per_message=False,
 )
+
+
+# ---------------------------------------------------------------------------
+# Snooze Callback Handler
+# ---------------------------------------------------------------------------
+
+async def snooze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle inline snooze button click from reminder notifications.
+    Pattern: snooze:<task_id>:<snooze_type>
+    """
+    query = update.callback_query
+    await query.answer()
+    tg_user = update.effective_user
+    if tg_user is None:
+        return
+
+    parts = query.data.split(":")
+    task_id = int(parts[1])
+    snooze_type = parts[2]
+
+    with get_db() as db:
+        user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
+        task = get_task_by_id(db, task_id, user.id)
+
+        if task is None:
+            await query.edit_message_text(
+                SNOOZE_NOT_FOUND.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        if task.status == TaskStatus.completed:
+            await query.edit_message_text(
+                SNOOZE_ALREADY_COMPLETED.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        if task.status == TaskStatus.cancelled:
+            await query.edit_message_text(
+                SNOOZE_ALREADY_CANCELLED.format(task_id=task_id), parse_mode="HTML"
+            )
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        new_due_utc = calculate_snooze_datetime(
+            current_utc=now_utc,
+            snooze_type=snooze_type,
+            tz_string=user.timezone,
+            original_due_utc=task.due_at,
+        )
+
+        snooze_task(db, task, new_due_utc)
+        new_due_str = format_dt_local(new_due_utc, user.timezone)
+        title = task.title
+
+    await query.edit_message_text(
+        SNOOZE_SUCCESS.format(
+            title=html.escape(title),
+            due_display=new_due_str,
+        ),
+        parse_mode="HTML",
+        reply_markup=action_nav_keyboard(),
+    )
+    logger.info("Task %s snoozed for %s by user %s", task_id, snooze_type, tg_user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1397,6 +1609,7 @@ handlers = [
     CallbackQueryHandler(today_callback, pattern=f"^({CB_TODAY_REFRESH}|{CB_VIEW_TODAY})$"),
     CallbackQueryHandler(upcoming_callback, pattern=f"^({CB_UPCOMING_REFRESH}|{CB_VIEW_UPCOMING})$"),
     CallbackQueryHandler(done_callback, pattern=r"^(done:select:\d+|done:cancel)$"),
+    CallbackQueryHandler(snooze_callback, pattern=r"^snooze:\d+:(10m|30m|1h|tomorrow)$"),
     CallbackQueryHandler(delete_ask_callback, pattern=r"^delete:ask:\d+$"),
     CallbackQueryHandler(delete_confirm_callback, pattern=r"^(delete:confirm:\d+|delete:cancel)$"),
 ]

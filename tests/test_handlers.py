@@ -22,6 +22,7 @@ from bot.database.models import Task, TaskPriority, TaskStatus
 from bot.handlers.tasks import (
     ASK_DATE,
     ASK_PRIORITY,
+    ASK_RECURRENCE,
     ASK_TIME,
     ASK_TITLE,
     CONFIRM,
@@ -29,19 +30,23 @@ from bot.handlers.tasks import (
     STATE_EDIT_CONFIRM,
     STATE_EDIT_INPUT_DATE,
     STATE_EDIT_INPUT_PRIORITY,
+    STATE_EDIT_INPUT_RECURRENCE,
     STATE_EDIT_INPUT_TIME,
     STATE_EDIT_INPUT_TITLE,
     STATE_EDIT_SELECT_TASK,
     UD_DATE,
     UD_EDIT_NEW_DUE,
     UD_EDIT_NEW_PRIORITY,
+    UD_EDIT_NEW_RECURRENCE,
     UD_EDIT_NEW_TITLE,
     UD_EDIT_ORIG_DUE,
     UD_EDIT_ORIG_PRIORITY,
+    UD_EDIT_ORIG_RECURRENCE,
     UD_EDIT_ORIG_TITLE,
     UD_EDIT_TASK_ID,
     UD_EDIT_TIMEZONE,
     UD_PRIORITY,
+    UD_RECURRENCE,
     UD_TIME,
     UD_TIMEZONE,
     UD_TITLE,
@@ -63,11 +68,15 @@ from bot.handlers.tasks import (
     receive_edit_confirmation,
     receive_edit_date,
     receive_edit_priority,
+    receive_edit_recurrence,
     receive_edit_time,
     receive_edit_title,
     receive_priority,
+    receive_recurrence,
     receive_time,
     receive_title,
+    recurrence_text_guard,
+    snooze_callback,
     today_callback,
     today_command,
     upcoming_callback,
@@ -81,11 +90,20 @@ from bot.utils.keyboards import (
     CB_EDIT_CANCEL,
     CB_EDIT_FIELD_DATE,
     CB_EDIT_FIELD_PRIORITY,
+    CB_EDIT_FIELD_RECURRENCE,
     CB_EDIT_FIELD_TIME,
     CB_EDIT_FIELD_TITLE,
     CB_EDIT_SAVE,
     CB_PRIORITY_HIGH,
     CB_PRIORITY_LOW,
+    CB_REC_DAILY,
+    CB_REC_MONTHLY,
+    CB_REC_NONE,
+    CB_REC_WEEKLY,
+    CB_SNOOZE_10M,
+    CB_SNOOZE_30M,
+    CB_SNOOZE_1H,
+    CB_SNOOZE_TOMORROW,
     CB_TODAY_REFRESH,
     CB_UPCOMING_REFRESH,
     CB_VIEW_TODAY,
@@ -246,10 +264,82 @@ async def test_receive_priority(mock_context):
 
     state = await receive_priority(update, mock_context)
 
-    assert state == CONFIRM
+    assert state == ASK_RECURRENCE
     assert mock_context.user_data[UD_PRIORITY] == TaskPriority.high
     update.callback_query.answer.assert_awaited_once()
     update.callback_query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recurrence_text_guard(mock_context):
+    update = _create_mock_update(text="random text instead of button")
+    state = await recurrence_text_guard(update, mock_context)
+    assert state == ASK_RECURRENCE
+    update.message.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_recurrence_none(mock_context):
+    mock_context.user_data[UD_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_TITLE] = "Finish assignment"
+    mock_context.user_data[UD_DATE] = date(2030, 1, 1)
+    mock_context.user_data[UD_TIME] = time(10, 0)
+    mock_context.user_data[UD_PRIORITY] = TaskPriority.high
+    update = _create_mock_update(callback_data=CB_REC_NONE)
+
+    state = await receive_recurrence(update, mock_context)
+
+    assert state == CONFIRM
+    assert mock_context.user_data[UD_RECURRENCE] is None
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_recurrence_daily(mock_context):
+    mock_context.user_data[UD_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_TITLE] = "Daily Standup"
+    mock_context.user_data[UD_DATE] = date(2030, 1, 1)
+    mock_context.user_data[UD_TIME] = time(10, 0)
+    mock_context.user_data[UD_PRIORITY] = TaskPriority.medium
+    update = _create_mock_update(callback_data=CB_REC_DAILY)
+
+    state = await receive_recurrence(update, mock_context)
+
+    assert state == CONFIRM
+    assert mock_context.user_data[UD_RECURRENCE] == "daily"
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_recurrence_weekly(mock_context):
+    mock_context.user_data[UD_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_TITLE] = "Weekly Planning"
+    mock_context.user_data[UD_DATE] = date(2030, 1, 1)
+    mock_context.user_data[UD_TIME] = time(10, 0)
+    mock_context.user_data[UD_PRIORITY] = TaskPriority.low
+    update = _create_mock_update(callback_data=CB_REC_WEEKLY)
+
+    state = await receive_recurrence(update, mock_context)
+
+    assert state == CONFIRM
+    assert mock_context.user_data[UD_RECURRENCE] == "weekly"
+
+
+@pytest.mark.asyncio
+async def test_receive_recurrence_monthly(mock_context):
+    mock_context.user_data[UD_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_TITLE] = "Monthly Rent"
+    mock_context.user_data[UD_DATE] = date(2030, 1, 1)
+    mock_context.user_data[UD_TIME] = time(10, 0)
+    mock_context.user_data[UD_PRIORITY] = TaskPriority.high
+    update = _create_mock_update(callback_data=CB_REC_MONTHLY)
+
+    state = await receive_recurrence(update, mock_context)
+
+    assert state == CONFIRM
+    assert mock_context.user_data[UD_RECURRENCE] == "monthly"
 
 
 @pytest.mark.asyncio
@@ -719,3 +809,238 @@ async def test_cancel_edit(mock_context):
     state = await cancel_edit(update, mock_context)
     assert state == ConversationHandler.END
     assert UD_EDIT_TASK_ID not in mock_context.user_data
+
+
+# ===========================================================================
+# Phase 6: Edit Recurrence Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_edit_choose_field_recurrence(mock_context):
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime.now(timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_RECURRENCE] = "daily"
+
+    update = _create_mock_update(callback_data=CB_EDIT_FIELD_RECURRENCE)
+    state = await edit_choose_field_callback(update, mock_context)
+
+    assert state == STATE_EDIT_INPUT_RECURRENCE
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_edit_recurrence(mock_context):
+    mock_context.user_data[UD_EDIT_TASK_ID] = 42
+    mock_context.user_data[UD_EDIT_TIMEZONE] = "Asia/Kolkata"
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = "Yoga"
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = datetime.now(timezone.utc)
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = TaskPriority.medium
+    mock_context.user_data[UD_EDIT_ORIG_RECURRENCE] = None
+
+    update = _create_mock_update(callback_data=CB_REC_WEEKLY)
+    state = await receive_edit_recurrence(update, mock_context)
+
+    assert state == STATE_EDIT_CONFIRM
+    assert mock_context.user_data[UD_EDIT_NEW_RECURRENCE] == "weekly"
+    update.callback_query.edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_confirmation_save_recurrence(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    user = get_or_create_user(db_session, telegram_user_id=14101, username="edit_rec_user")
+    task = create_task(
+        db_session, user=user, title="Workout", due_at_utc=datetime.now(timezone.utc) + timedelta(days=1)
+    )
+    db_session.commit()
+
+    mock_context.user_data[UD_EDIT_TASK_ID] = task.id
+    mock_context.user_data[UD_EDIT_TIMEZONE] = user.timezone
+    mock_context.user_data[UD_EDIT_ORIG_TITLE] = task.title
+    mock_context.user_data[UD_EDIT_ORIG_DUE] = task.due_at
+    mock_context.user_data[UD_EDIT_ORIG_PRIORITY] = task.priority
+    mock_context.user_data[UD_EDIT_ORIG_RECURRENCE] = None
+    mock_context.user_data[UD_EDIT_NEW_RECURRENCE] = "daily"
+
+    update = _create_mock_update(user_id=14101, callback_data=CB_EDIT_SAVE)
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        state = await receive_edit_confirmation(update, mock_context)
+
+    assert state == ConversationHandler.END
+    refreshed = db_session.query(Task).filter_by(id=task.id).one()
+    assert refreshed.recurrence == "daily"
+
+
+# ===========================================================================
+# Phase 6: Snooze Callback Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_snooze_callback_10m(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=15101, username="snooze_user")
+    task = create_task(db_session, user=user, title="Call dentist", due_at_utc=now)
+    task.reminder_sent = True
+    db_session.commit()
+
+    update = _create_mock_update(user_id=15101, callback_data=f"snooze:{task.id}:{CB_SNOOZE_10M}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await snooze_callback(update, mock_context)
+
+    update.callback_query.answer.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited_once()
+
+    refreshed = db_session.query(Task).filter_by(id=task.id).one()
+    assert refreshed.reminder_sent is False
+    assert refreshed.snoozed_until is not None
+    assert refreshed.due_at > now
+
+
+@pytest.mark.asyncio
+async def test_snooze_callback_tomorrow(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=15102, username="snooze_tmrw_user")
+    task = create_task(db_session, user=user, title="Submit report", due_at_utc=now)
+    task.reminder_sent = True
+    db_session.commit()
+
+    update = _create_mock_update(user_id=15102, callback_data=f"snooze:{task.id}:{CB_SNOOZE_TOMORROW}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await snooze_callback(update, mock_context)
+
+    refreshed = db_session.query(Task).filter_by(id=task.id).one()
+    assert refreshed.reminder_sent is False
+    assert refreshed.due_at.date() > now.date()
+
+
+@pytest.mark.asyncio
+async def test_snooze_callback_already_completed(db_session, mock_context):
+    from bot.services.task_service import complete_task, create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=15103, username="snooze_done_user")
+    task = create_task(db_session, user=user, title="Already done", due_at_utc=now)
+    complete_task(db_session, task=task)
+    db_session.commit()
+
+    update = _create_mock_update(user_id=15103, callback_data=f"snooze:{task.id}:{CB_SNOOZE_10M}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await snooze_callback(update, mock_context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    args, kwargs = update.callback_query.edit_message_text.call_args
+    assert "already completed" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_snooze_callback_already_cancelled(db_session, mock_context):
+    from bot.services.task_service import create_task, delete_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=15104, username="snooze_del_user")
+    task = create_task(db_session, user=user, title="Deleted task", due_at_utc=now)
+    delete_task(db_session, task=task)
+    db_session.commit()
+
+    update = _create_mock_update(user_id=15104, callback_data=f"snooze:{task.id}:{CB_SNOOZE_10M}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await snooze_callback(update, mock_context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    args, kwargs = update.callback_query.edit_message_text.call_args
+    assert "deleted" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_snooze_callback_not_found_or_unowned(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=15105, username="owner_user")
+    task = create_task(db_session, user=user, title="Private task", due_at_utc=now)
+    db_session.commit()
+
+    # User 99999 attempts to snooze user 15105's task
+    update = _create_mock_update(user_id=99999, callback_data=f"snooze:{task.id}:{CB_SNOOZE_10M}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await snooze_callback(update, mock_context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    args, kwargs = update.callback_query.edit_message_text.call_args
+    assert "not found" in args[0].lower() or "not owned" in args[0].lower()
+
+
+# ===========================================================================
+# Phase 6: Done Recurring Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_done_recurring_task_via_callback(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=16101, username="rec_done_user")
+    task = create_task(
+        db_session, user=user, title="Daily Vitamin", due_at_utc=now, recurrence="daily"
+    )
+    db_session.commit()
+
+    update = _create_mock_update(user_id=16101, callback_data=f"done:select:{task.id}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_callback(update, mock_context)
+
+    update.callback_query.edit_message_text.assert_awaited_once()
+    args, kwargs = update.callback_query.edit_message_text.call_args
+    assert "Next occurrence scheduled" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_done_recurring_task_via_command(db_session, mock_context):
+    from bot.services.task_service import create_task
+    from bot.services.user_service import get_or_create_user
+
+    now = datetime.now(timezone.utc)
+    user = get_or_create_user(db_session, telegram_user_id=16102, username="rec_done_cmd_user")
+    task = create_task(
+        db_session, user=user, title="Weekly Review", due_at_utc=now, recurrence="weekly"
+    )
+    db_session.commit()
+
+    mock_context.args = [str(task.id)]
+    update = _create_mock_update(user_id=16102, text=f"/done {task.id}")
+
+    with patch("bot.handlers.tasks.get_db") as mock_get_db:
+        mock_get_db.return_value.__enter__.return_value = db_session
+        await done_command(update, mock_context)
+
+    update.message.reply_text.assert_awaited_once()
+    args, kwargs = update.message.reply_text.call_args
+    assert "Next occurrence scheduled" in args[0]
+

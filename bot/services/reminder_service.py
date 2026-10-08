@@ -22,7 +22,7 @@ from telegram.error import TelegramError
 
 from bot.config import settings
 from bot.database.database import get_db
-from bot.database.models import Task
+from bot.database.models import RECURRENCE_LABELS, Task
 from bot.services.task_service import get_due_tasks, mark_reminder_sent
 from bot.utils.datetime_utils import format_dt_local
 from bot.utils.keyboards import PRIORITY_ICONS, reminder_keyboard
@@ -48,6 +48,7 @@ def format_reminder_message(task: Task, tz_string: str) -> str:
     due_str = format_dt_local(task.due_at, tz_string) if task.due_at else "Not set"
     p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
     p_label = task.priority.value.capitalize()
+    rec_label = RECURRENCE_LABELS.get(task.recurrence, "None") if task.recurrence else "None"
 
     return REMINDER_NOTIFICATION.format(
         task_id=task.id,
@@ -55,6 +56,7 @@ def format_reminder_message(task: Task, tz_string: str) -> str:
         due_display=due_str,
         priority_icon=p_icon,
         priority_label=p_label,
+        recurrence_label=rec_label,
     )
 
 

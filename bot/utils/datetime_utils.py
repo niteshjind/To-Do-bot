@@ -10,6 +10,7 @@ Supported user input formats:
   • Time : HH:MM       (24-hour, e.g. 09:30)
 """
 
+import calendar
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
@@ -224,3 +225,130 @@ def get_local_date_and_time(dt_utc: datetime, tz_string: str) -> tuple[date, tim
     local_tz = pytz.timezone(tz_string)
     local_dt = dt_utc.astimezone(local_tz)
     return local_dt.date(), local_dt.time()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Snooze and Recurrence Calculations
+# ---------------------------------------------------------------------------
+
+def calculate_snooze_datetime(
+    current_utc: datetime,
+    snooze_type: str,
+    tz_string: str,
+    original_due_utc: Optional[datetime] = None,
+) -> datetime:
+    """
+    Calculate the new UTC datetime when a task is snoozed.
+
+    Options:
+      - "10m": current_utc + 10 minutes
+      - "30m": current_utc + 30 minutes
+      - "1h":  current_utc + 1 hour
+      - "tomorrow": next calendar day in user's timezone, preserving original local time.
+
+    Args:
+        current_utc: Current UTC timestamp (timezone-aware).
+        snooze_type: One of {"10m", "30m", "1h", "tomorrow"}.
+        tz_string: IANA timezone string for the user.
+        original_due_utc: Previous due time in UTC (used to preserve local time for "tomorrow").
+
+    Returns:
+        Timezone-aware datetime in UTC.
+
+    Raises:
+        ValueError: If datetimes are naive or snooze_type is unsupported.
+    """
+    if current_utc.tzinfo is None:
+        raise ValueError("current_utc must be a timezone-aware datetime.")
+
+    if snooze_type == "10m":
+        return current_utc + timedelta(minutes=10)
+    elif snooze_type == "30m":
+        return current_utc + timedelta(minutes=30)
+    elif snooze_type == "1h":
+        return current_utc + timedelta(hours=1)
+    elif snooze_type == "tomorrow":
+        local_tz = pytz.timezone(tz_string)
+        current_local = current_utc.astimezone(local_tz)
+        tomorrow_date = current_local.date() + timedelta(days=1)
+
+        # Preserve previous scheduled local time if available, otherwise current local time
+        if original_due_utc is not None and original_due_utc.tzinfo is not None:
+            target_time = original_due_utc.astimezone(local_tz).time()
+        else:
+            target_time = current_local.time()
+
+        return combine_to_utc(tomorrow_date, target_time, tz_string)
+    else:
+        raise ValueError(f"Unsupported snooze_type: {snooze_type!r}")
+
+
+def calculate_next_occurrence(
+    base_dt_utc: datetime,
+    recurrence: str,
+    tz_string: str,
+    after_utc: Optional[datetime] = None,
+) -> datetime:
+    """
+    Calculate the next occurrence datetime for a recurring task.
+
+    Supports:
+      - "daily": +1 day in user's local calendar
+      - "weekly": +7 days in user's local calendar
+      - "monthly": +1 month in user's local calendar (with month-end boundary safety)
+
+    If `after_utc` is provided (e.g. current UTC time), the calculation advances
+    as many intervals as needed until the returned datetime is strictly after `after_utc`.
+
+    Args:
+        base_dt_utc: Current due datetime in UTC.
+        recurrence: Recurrence rule ("daily", "weekly", "monthly").
+        tz_string: IANA timezone name.
+        after_utc: Optional threshold UTC datetime that the result must be strictly after.
+
+    Returns:
+        Timezone-aware datetime in UTC for the next occurrence.
+
+    Raises:
+        ValueError: If base_dt_utc is naive or recurrence is unsupported.
+    """
+    if base_dt_utc.tzinfo is None:
+        raise ValueError("base_dt_utc must be a timezone-aware datetime.")
+
+    rec_lower = recurrence.lower()
+    if rec_lower not in {"daily", "weekly", "monthly"}:
+        raise ValueError(f"Unsupported recurrence rule: {recurrence!r}")
+
+    local_tz = pytz.timezone(tz_string)
+    local_dt = base_dt_utc.astimezone(local_tz)
+    local_time = local_dt.time()
+    cur_date = local_dt.date()
+
+    def _step(d: date) -> date:
+        if rec_lower == "daily":
+            return d + timedelta(days=1)
+        elif rec_lower == "weekly":
+            return d + timedelta(days=7)
+        elif rec_lower == "monthly":
+            year = d.year
+            month = d.month + 1
+            if month > 12:
+                month = 1
+                year += 1
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(d.day, max_day)
+            return date(year, month, day)
+        return d
+
+    next_date = _step(cur_date)
+    next_utc = combine_to_utc(next_date, local_time, tz_string)
+
+    if after_utc is not None:
+        if after_utc.tzinfo is None:
+            raise ValueError("after_utc must be a timezone-aware datetime.")
+        while next_utc <= after_utc:
+            next_date = _step(next_date)
+            next_utc = combine_to_utc(next_date, local_time, tz_string)
+
+    return next_utc
+

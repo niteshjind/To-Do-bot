@@ -17,6 +17,8 @@ import pytest
 import pytz
 
 from bot.utils.datetime_utils import (
+    calculate_next_occurrence,
+    calculate_snooze_datetime,
     combine_to_utc,
     current_time_display,
     example_date_string,
@@ -360,3 +362,115 @@ class TestGetLocalDateAndTime:
         local_d, local_t = get_local_date_and_time(dt, "Asia/Kolkata")
         assert local_d == date(2026, 10, 7)
         assert local_t == time(1, 0)
+
+
+# ===========================================================================
+# Phase 6: calculate_snooze_datetime
+# ===========================================================================
+
+class TestCalculateSnoozeDatetime:
+    def test_snooze_10m(self) -> None:
+        now_utc = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
+        res = calculate_snooze_datetime(now_utc, "10m", "Asia/Kolkata")
+        assert res == datetime(2026, 10, 7, 10, 10, tzinfo=timezone.utc)
+
+    def test_snooze_30m(self) -> None:
+        now_utc = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
+        res = calculate_snooze_datetime(now_utc, "30m", "Asia/Kolkata")
+        assert res == datetime(2026, 10, 7, 10, 30, tzinfo=timezone.utc)
+
+    def test_snooze_1h(self) -> None:
+        now_utc = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
+        res = calculate_snooze_datetime(now_utc, "1h", "Asia/Kolkata")
+        assert res == datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc)
+
+    def test_snooze_tomorrow_preserves_local_time(self) -> None:
+        # Original due: 07 Oct 2026 15:00 IST == 09:30 UTC
+        orig_due_utc = datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc)
+        # Snoozed at: 07 Oct 2026 15:05 IST == 09:35 UTC
+        now_utc = datetime(2026, 10, 7, 9, 35, tzinfo=timezone.utc)
+
+        res = calculate_snooze_datetime(
+            now_utc, "tomorrow", "Asia/Kolkata", original_due_utc=orig_due_utc
+        )
+        # Expected: 08 Oct 2026 15:00 IST == 09:30 UTC
+        assert res == datetime(2026, 10, 8, 9, 30, tzinfo=timezone.utc)
+
+    def test_snooze_tomorrow_without_original_due(self) -> None:
+        # If original_due is None, it uses now_utc's local time tomorrow
+        now_utc = datetime(2026, 10, 7, 9, 30, tzinfo=timezone.utc)
+        res = calculate_snooze_datetime(now_utc, "tomorrow", "Asia/Kolkata")
+        assert res == datetime(2026, 10, 8, 9, 30, tzinfo=timezone.utc)
+
+    def test_snooze_naive_datetime_raises(self) -> None:
+        naive_now = datetime(2026, 10, 7, 10, 0)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            calculate_snooze_datetime(naive_now, "10m", "Asia/Kolkata")
+
+    def test_snooze_invalid_type_raises(self) -> None:
+        now_utc = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="Unsupported snooze_type"):
+            calculate_snooze_datetime(now_utc, "invalid", "Asia/Kolkata")
+
+
+# ===========================================================================
+# Phase 6: calculate_next_occurrence
+# ===========================================================================
+
+class TestCalculateNextOccurrence:
+    def test_daily_recurrence(self) -> None:
+        # Base: 07 Oct 2026 10:00 IST == 04:30 UTC
+        base_utc = datetime(2026, 10, 7, 4, 30, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(base_utc, "daily", "Asia/Kolkata")
+        # Next: 08 Oct 2026 10:00 IST == 04:30 UTC
+        assert next_utc == datetime(2026, 10, 8, 4, 30, tzinfo=timezone.utc)
+
+    def test_weekly_recurrence(self) -> None:
+        # Base: 07 Oct 2026 10:00 IST == 04:30 UTC
+        base_utc = datetime(2026, 10, 7, 4, 30, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(base_utc, "weekly", "Asia/Kolkata")
+        # Next: 14 Oct 2026 10:00 IST == 04:30 UTC
+        assert next_utc == datetime(2026, 10, 14, 4, 30, tzinfo=timezone.utc)
+
+    def test_monthly_recurrence(self) -> None:
+        # Base: 15 Oct 2026 10:00 IST == 04:30 UTC
+        base_utc = datetime(2026, 10, 15, 4, 30, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(base_utc, "monthly", "Asia/Kolkata")
+        # Next: 15 Nov 2026 10:00 IST == 04:30 UTC
+        assert next_utc == datetime(2026, 11, 15, 4, 30, tzinfo=timezone.utc)
+
+    def test_monthly_recurrence_month_end_clamping(self) -> None:
+        # Base: 31 Jan 2026 10:00 IST == 04:30 UTC
+        # Feb 2026 only has 28 days -> clamped to 28 Feb
+        base_utc = datetime(2026, 1, 31, 4, 30, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(base_utc, "monthly", "Asia/Kolkata")
+        assert next_utc == datetime(2026, 2, 28, 4, 30, tzinfo=timezone.utc)
+
+    def test_monthly_recurrence_leap_year(self) -> None:
+        # 2028 is a leap year (Feb has 29 days)
+        base_utc = datetime(2028, 1, 31, 4, 30, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(base_utc, "monthly", "Asia/Kolkata")
+        assert next_utc == datetime(2028, 2, 29, 4, 30, tzinfo=timezone.utc)
+
+    def test_advances_past_after_utc_threshold(self) -> None:
+        # Task was due 5 days ago, recurring daily
+        base_utc = datetime(2026, 10, 1, 4, 30, tzinfo=timezone.utc)
+        # Completed today: 06 Oct 2026 05:00 UTC
+        now_utc = datetime(2026, 10, 6, 5, 0, tzinfo=timezone.utc)
+        next_utc = calculate_next_occurrence(
+            base_utc, "daily", "Asia/Kolkata", after_utc=now_utc
+        )
+        # Next occurrence should be strictly after now_utc: 07 Oct 2026 04:30 UTC
+        assert next_utc > now_utc
+        assert next_utc == datetime(2026, 10, 7, 4, 30, tzinfo=timezone.utc)
+
+    def test_naive_base_raises(self) -> None:
+        naive = datetime(2026, 10, 7, 10, 0)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            calculate_next_occurrence(naive, "daily", "Asia/Kolkata")
+
+    def test_unsupported_recurrence_raises(self) -> None:
+        base_utc = datetime(2026, 10, 7, 4, 30, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="Unsupported recurrence rule"):
+            calculate_next_occurrence(base_utc, "yearly", "Asia/Kolkata")
+

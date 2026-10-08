@@ -84,6 +84,25 @@ class TaskPriority(str, enum.Enum):
     high = "high"
 
 
+class TaskRecurrence(str, enum.Enum):
+    daily = "daily"
+    weekly = "weekly"
+    monthly = "monthly"
+
+
+RECURRENCE_LABELS = {
+    TaskRecurrence.daily.value: "Daily",
+    TaskRecurrence.weekly.value: "Weekly",
+    TaskRecurrence.monthly.value: "Monthly",
+}
+
+RECURRENCE_ICONS = {
+    TaskRecurrence.daily.value: "🔁",
+    TaskRecurrence.weekly.value: "🔁",
+    TaskRecurrence.monthly.value: "🔁",
+}
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
