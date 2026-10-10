@@ -26,7 +26,7 @@ Design rules:
 import html
 import logging
 from datetime import date, datetime, time, timezone
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 from telegram import Update
 from telegram.ext import (
@@ -40,7 +40,7 @@ from telegram.ext import (
 
 from bot.config import settings
 from bot.database.database import get_db
-from bot.database.models import RECURRENCE_LABELS, Task, TaskPriority, TaskRecurrence, TaskStatus
+from bot.database.models import RECURRENCE_LABELS, Task, TaskDTO, TaskPriority, TaskRecurrence, TaskStatus
 from bot.services.task_service import (
     _UNSET,
     complete_task,
@@ -633,7 +633,7 @@ _add_conversation = ConversationHandler(
 # Phase 3: Task Listing Views (/today & /upcoming)
 # ---------------------------------------------------------------------------
 
-def format_today_view(tasks: list[Task], tz_string: str) -> str:
+def format_today_view(tasks: Sequence[Union[Task, TaskDTO]], tz_string: str) -> str:
     """Format the list of tasks for the /today message."""
     if not tasks:
         return TODAY_EMPTY
@@ -667,7 +667,7 @@ def format_today_view(tasks: list[Task], tz_string: str) -> str:
     return "\n".join(lines)
 
 
-def format_upcoming_view(tasks: list[Task], tz_string: str, window_days: int) -> str:
+def format_upcoming_view(tasks: Sequence[Union[Task, TaskDTO]], tz_string: str, window_days: int) -> str:
     """Format the list of upcoming pending tasks grouped by date."""
     if not tasks:
         return UPCOMING_EMPTY.format(window_days=window_days)
@@ -707,8 +707,8 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         tasks = get_today_tasks(db, user)
         tz = user.timezone
+        message_text = format_today_view(tasks, tz)
 
-    message_text = format_today_view(tasks, tz)
     await update.message.reply_text(
         message_text,
         parse_mode="HTML",
@@ -732,8 +732,8 @@ async def upcoming_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         tasks = get_upcoming_tasks(db, user, days=window)
         tz = user.timezone
+        message_text = format_upcoming_view(tasks, tz, window)
 
-    message_text = format_upcoming_view(tasks, tz, window)
     await update.message.reply_text(
         message_text,
         parse_mode="HTML",
@@ -758,8 +758,8 @@ async def today_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         tasks = get_today_tasks(db, user)
         tz = user.timezone
+        text = format_today_view(tasks, tz)
 
-    text = format_today_view(tasks, tz)
     try:
         await query.edit_message_text(
             text, parse_mode="HTML", reply_markup=today_keyboard()
@@ -786,8 +786,8 @@ async def upcoming_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         tasks = get_upcoming_tasks(db, user, days=window)
         tz = user.timezone
+        text = format_upcoming_view(tasks, tz, window)
 
-    text = format_upcoming_view(tasks, tz, window)
     try:
         await query.edit_message_text(
             text, parse_mode="HTML", reply_markup=upcoming_keyboard()
@@ -926,6 +926,11 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
         pending = get_pending_tasks(db, user)
         tz = user.timezone
+        reply_markup = (
+            task_selection_keyboard(pending, "done:select", CB_DONE_CANCEL, tz)
+            if pending
+            else None
+        )
 
     if not pending:
         await update.message.reply_text(
@@ -936,7 +941,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         DONE_SELECT_TASK,
         parse_mode="HTML",
-        reply_markup=task_selection_keyboard(pending, "done:select", CB_DONE_CANCEL, tz),
+        reply_markup=reply_markup,
     )
 
 
@@ -1022,6 +1027,11 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
         tasks = get_pending_tasks(db, user)
         tz = user.timezone
+        reply_markup = (
+            task_selection_keyboard(tasks, "delete:ask", CB_DELETE_CANCEL, tz)
+            if tasks
+            else None
+        )
 
     if not tasks:
         await update.message.reply_text(
@@ -1032,7 +1042,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         DELETE_SELECT_TASK,
         parse_mode="HTML",
-        reply_markup=task_selection_keyboard(tasks, "delete:ask", CB_DELETE_CANCEL, tz),
+        reply_markup=reply_markup,
     )
 
 
@@ -1137,16 +1147,17 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
             p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
             rec_label = RECURRENCE_LABELS.get(task.recurrence, "None (one-time)")
-
-        await update.message.reply_text(
-            EDIT_MENU.format(
+            menu_text = EDIT_MENU.format(
                 task_id=task.id,
                 title=html.escape(task.title),
                 due_display=due_display,
                 priority_icon=p_icon,
                 priority_label=task.priority.value.capitalize(),
                 recurrence_label=rec_label,
-            ),
+            )
+
+        await update.message.reply_text(
+            menu_text,
             parse_mode="HTML",
             reply_markup=edit_fields_keyboard(),
         )
@@ -1157,6 +1168,11 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user = get_or_create_user(db, tg_user.id, tg_user.username, tg_user.first_name)
         tasks = get_pending_tasks(db, user)
         tz = user.timezone
+        reply_markup = (
+            task_selection_keyboard(tasks, "edit:select", CB_EDIT_CANCEL, tz)
+            if tasks
+            else None
+        )
 
     if not tasks:
         await update.message.reply_text(
@@ -1168,7 +1184,7 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         EDIT_SELECT_TASK,
         parse_mode="HTML",
-        reply_markup=task_selection_keyboard(tasks, "edit:select", CB_EDIT_CANCEL, tz),
+        reply_markup=reply_markup,
     )
     return STATE_EDIT_SELECT_TASK
 
@@ -1203,16 +1219,17 @@ async def edit_select_task_callback(update: Update, context: ContextTypes.DEFAUL
         due_display = format_dt_local(task.due_at, user.timezone) if task.due_at else "No reminder"
         p_icon = PRIORITY_ICONS.get(task.priority.value, "⚪")
         rec_label = RECURRENCE_LABELS.get(task.recurrence, "None (one-time)")
-
-    await query.edit_message_text(
-        EDIT_MENU.format(
+        menu_text = EDIT_MENU.format(
             task_id=task.id,
             title=html.escape(task.title),
             due_display=due_display,
             priority_icon=p_icon,
             priority_label=task.priority.value.capitalize(),
             recurrence_label=rec_label,
-        ),
+        )
+
+    await query.edit_message_text(
+        menu_text,
         parse_mode="HTML",
         reply_markup=edit_fields_keyboard(),
     )

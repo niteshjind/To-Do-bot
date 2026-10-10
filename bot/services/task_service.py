@@ -20,7 +20,7 @@ from typing import Optional
 from sqlalchemy.orm import Session, joinedload
 
 from bot.config import settings
-from bot.database.models import Task, TaskPriority, TaskStatus, User
+from bot.database.models import Task, TaskDTO, TaskPriority, TaskStatus, User
 from bot.utils.datetime_utils import calculate_next_occurrence, get_day_boundaries_utc
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_TITLE_LENGTH = 500  # Enforce in service AND handler for defence-in-depth
+
+
+def to_task_dto(task: Task) -> TaskDTO:
+    """Convert an ORM Task instance into a safe detached TaskDTO."""
+    return task.to_dto()
 
 
 def create_task(

@@ -13,6 +13,7 @@ VARCHAR and PostgreSQL ENUM alike.
 """
 
 import enum
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -220,4 +221,53 @@ class Task(Base):
         return (
             f"<Task id={self.id} user_id={self.user_id} "
             f"status={self.status!r} title={self.title[:30]!r}>"
+        )
+
+    def to_dto(self) -> "TaskDTO":
+        """Convert this Task ORM instance into a safe detached DTO."""
+        return TaskDTO.from_orm(self)
+
+
+# ---------------------------------------------------------------------------
+# Data Transfer Objects (DTO)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TaskDTO:
+    """
+    Safe detached snapshot of a Task.
+
+    Contains all core fields of a task without being bound to a live SQLAlchemy
+    session. Safe to pass across handler boundaries, async calls, or after session close.
+    """
+
+    id: int
+    user_id: int
+    title: str
+    status: TaskStatus
+    priority: TaskPriority
+    due_at: Optional[datetime]
+    recurrence: Optional[str]
+    reminder_sent: bool
+    snoozed_until: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_orm(cls, task: "Task") -> "TaskDTO":
+        """Create a TaskDTO snapshot from a Task ORM instance."""
+        return cls(
+            id=task.id,
+            user_id=task.user_id,
+            title=task.title,
+            status=task.status,
+            priority=task.priority,
+            due_at=task.due_at,
+            recurrence=task.recurrence,
+            reminder_sent=task.reminder_sent,
+            snoozed_until=task.snoozed_until,
+            completed_at=task.completed_at,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
         )
