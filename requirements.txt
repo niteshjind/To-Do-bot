@@ -9,6 +9,9 @@ python-telegram-bot==21.*
 # ORM (database-agnostic; SQLite dev, PostgreSQL prod)
 SQLAlchemy==2.*
 
+# PostgreSQL database driver (production)
+psycopg2-binary>=2.9.9
+
 # Database migration tool (pairs with SQLAlchemy)
 alembic==1.*
 

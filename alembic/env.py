@@ -40,6 +40,9 @@ if not custom_url:
     else:
         custom_url = settings.DATABASE_URL
 
+if custom_url and custom_url.startswith("postgres://"):
+    custom_url = "postgresql://" + custom_url[len("postgres://"):]
+
 config.set_main_option("sqlalchemy.url", custom_url)
 
 # Set up Python logging using the config in alembic.ini

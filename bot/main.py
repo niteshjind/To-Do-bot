@@ -22,6 +22,8 @@ from typing import Optional
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
 
+from sqlalchemy.engine import make_url
+
 from bot.config import settings
 from bot.database.database import init_db
 from bot.handlers.settings import handlers as settings_handlers
@@ -29,6 +31,17 @@ from bot.handlers.start import handlers as start_handlers, unknown_command
 from bot.handlers.tasks import handlers as task_handlers
 from bot.scheduler import create_scheduler, start_scheduler, stop_scheduler
 from bot.services.reminder_service import process_due_reminders
+
+
+def _mask_db_url(raw_url: str) -> str:
+    """Mask password credentials in database URL for safe logging."""
+    if not raw_url:
+        return ""
+    try:
+        url_obj = make_url(raw_url)
+        return url_obj.render_as_string(hide_password=True)
+    except Exception:
+        return "[redacted]"
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +211,7 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("  Telegram To-Do Bot starting up...")
     logger.info("  Mode    : %s", settings.BOT_MODE)
-    logger.info("  DB URL  : %s", settings.DATABASE_URL)
+    logger.info("  DB URL  : %s", _mask_db_url(settings.DATABASE_URL))
     logger.info("  Timezone: %s", settings.TIMEZONE)
     logger.info("  Log level: %s", settings.LOG_LEVEL)
     logger.info("=" * 60)

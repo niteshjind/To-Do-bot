@@ -11,7 +11,7 @@ Usage:
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # Webhook settings (only used when BOT_MODE="webhook")
     WEBHOOK_URL: str = ""
-    WEBHOOK_PORT: int = 8443
+    WEBHOOK_PORT: int = Field(default=8443, validation_alias=AliasChoices("WEBHOOK_PORT", "PORT"))
     WEBHOOK_SECRET_TOKEN: str = ""
 
     # -------------------------------------------------------------------------
@@ -69,6 +69,16 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """
+        Normalize legacy postgres:// URLs to postgresql:// for SQLAlchemy 2.x compatibility.
+        """
+        if isinstance(v, str) and v.startswith("postgres://"):
+            return "postgresql://" + v[len("postgres://"):]
+        return v
+
     @field_validator("LOG_LEVEL")
     @classmethod
     def validate_log_level(cls, v: str) -> str:

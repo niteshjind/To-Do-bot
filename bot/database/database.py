@@ -42,12 +42,16 @@ logger = logging.getLogger(__name__)
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
     """Enable WAL journal mode for SQLite connections."""
-    # Guard: only apply to SQLite
-    if "sqlite" in settings.DATABASE_URL:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+    # Guard: strictly apply only to genuine SQLite connections
+    module = getattr(dbapi_connection, "__class__", None).__module__ if hasattr(dbapi_connection, "__class__") else ""
+    if "sqlite" in module:
+        if hasattr(dbapi_connection, "cursor"):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +91,17 @@ def _migrate_schema(bind_engine: Engine) -> None:
     """
     Safely and idempotently apply missing columns to existing SQLite tables.
     Preserves all existing user records and sets server defaults.
+
+    Skipped for non-SQLite engines (e.g. PostgreSQL), where migrations
+    must be managed via Alembic.
     """
+    if getattr(bind_engine.dialect, "name", "") != "sqlite":
+        logger.debug(
+            "_migrate_schema skipped: dialect is '%s' (schema migrations for non-SQLite engines are managed via Alembic).",
+            getattr(bind_engine.dialect, "name", "unknown"),
+        )
+        return
+
     from sqlalchemy import inspect
 
     inspector = inspect(bind_engine)
