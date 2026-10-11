@@ -27,6 +27,7 @@ from sqlalchemy import (
     Integer,
     String,
     TypeDecorator,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -132,6 +133,20 @@ class User(Base):
     # IANA timezone string (e.g. "Asia/Kolkata").
     # Default set to Asia/Kolkata per F1 decision.
     timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
+
+    # Notification & summary preferences (Phase 7)
+    reminders_enabled = Column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
+    daily_summary_enabled = Column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
+    daily_summary_time = Column(
+        String(5), nullable=False, default="09:00", server_default="09:00"
+    )
+    last_summary_date = Column(
+        String(10), nullable=True, default=None
+    )
 
     created_at = Column(
         UTCDateTime, nullable=False, default=_utcnow

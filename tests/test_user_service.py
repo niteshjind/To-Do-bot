@@ -12,13 +12,21 @@ All tests use the in-memory `db_session` fixture from conftest.py.
 No real database file is created.
 """
 
+from datetime import date
 import pytest
 from sqlalchemy.orm import Session
 
 from bot.database.models import User
 from bot.services.user_service import (
+    UserSettingsDTO,
     get_or_create_user,
     get_user_by_telegram_id,
+    get_user_settings,
+    get_user_settings_by_telegram_id,
+    update_daily_summary_enabled,
+    update_daily_summary_time,
+    update_last_summary_date,
+    update_reminders_enabled,
     update_timezone,
 )
 
@@ -49,6 +57,16 @@ class TestGetOrCreateUser:
         db_session.commit()
 
         assert user.timezone == "Asia/Kolkata"
+
+    def test_default_preferences_for_new_user(self, db_session: Session) -> None:
+        """New users receive Phase 7 default notification and summary preferences."""
+        user = get_or_create_user(db=db_session, telegram_user_id=222223)
+        db_session.commit()
+
+        assert user.reminders_enabled is True
+        assert user.daily_summary_enabled is True
+        assert user.daily_summary_time == "09:00"
+        assert user.last_summary_date is None
 
     def test_returns_existing_user_on_repeat_call(self, db_session: Session) -> None:
         """Calling get_or_create_user twice with the same ID returns the same row."""
@@ -166,3 +184,203 @@ class TestUpdateTimezone:
         db_session.commit()
 
         assert updated.timezone == "UTC"
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: get_user_settings & get_user_settings_by_telegram_id
+# ---------------------------------------------------------------------------
+
+class TestUserSettings:
+    def test_get_user_settings_returns_defaults(self, db_session: Session) -> None:
+        """New user receives expected default settings in UserSettingsDTO."""
+        user = get_or_create_user(db=db_session, telegram_user_id=404040)
+        db_session.commit()
+
+        # Call with user instance
+        settings_from_user = get_user_settings(user)
+        assert isinstance(settings_from_user, UserSettingsDTO)
+        assert settings_from_user.user_id == user.id
+        assert settings_from_user.telegram_user_id == 404040
+        assert settings_from_user.timezone == "Asia/Kolkata"
+        assert settings_from_user.reminders_enabled is True
+        assert settings_from_user.daily_summary_enabled is True
+        assert settings_from_user.daily_summary_time == "09:00"
+        assert settings_from_user.last_summary_date is None
+
+        # Call with (db, user)
+        settings_from_db = get_user_settings(db_session, user)
+        assert settings_from_db == settings_from_user
+
+    def test_get_user_settings_invalid_argument_raises(self, db_session: Session) -> None:
+        """Calling get_user_settings without a valid User raises ValueError."""
+        with pytest.raises(ValueError, match="A valid User instance must be provided"):
+            get_user_settings(None)
+
+    def test_get_user_settings_by_telegram_id_existing(self, db_session: Session) -> None:
+        """Returns UserSettingsDTO for known telegram_user_id."""
+        user = get_or_create_user(db=db_session, telegram_user_id=505050)
+        db_session.commit()
+
+        settings = get_user_settings_by_telegram_id(db=db_session, telegram_user_id=505050)
+        assert settings is not None
+        assert settings.telegram_user_id == 505050
+        assert settings.daily_summary_time == "09:00"
+
+    def test_get_user_settings_by_telegram_id_unknown(self, db_session: Session) -> None:
+        """Returns None for unknown telegram_user_id."""
+        settings = get_user_settings_by_telegram_id(db=db_session, telegram_user_id=999000)
+        assert settings is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: update_reminders_enabled
+# ---------------------------------------------------------------------------
+
+class TestUpdateRemindersEnabled:
+    def test_toggle_reminders(self, db_session: Session) -> None:
+        """Enabling and disabling reminders updates the record."""
+        user = get_or_create_user(db=db_session, telegram_user_id=606060)
+        db_session.commit()
+
+        # Disable
+        updated = update_reminders_enabled(db=db_session, user=user, enabled=False)
+        db_session.commit()
+        assert updated.reminders_enabled is False
+
+        # Re-enable
+        updated = update_reminders_enabled(db=db_session, user=user, enabled=True)
+        db_session.commit()
+        assert updated.reminders_enabled is True
+
+    def test_invalid_type_raises(self, db_session: Session) -> None:
+        """Passing a non-boolean raises ValueError."""
+        user = get_or_create_user(db=db_session, telegram_user_id=606061)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="must be a boolean"):
+            update_reminders_enabled(db=db_session, user=user, enabled="true")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: update_daily_summary_enabled
+# ---------------------------------------------------------------------------
+
+class TestUpdateDailySummaryEnabled:
+    def test_toggle_daily_summary(self, db_session: Session) -> None:
+        """Enabling and disabling daily summary updates the record."""
+        user = get_or_create_user(db=db_session, telegram_user_id=707070)
+        db_session.commit()
+
+        # Disable
+        updated = update_daily_summary_enabled(db=db_session, user=user, enabled=False)
+        db_session.commit()
+        assert updated.daily_summary_enabled is False
+
+        # Re-enable
+        updated = update_daily_summary_enabled(db=db_session, user=user, enabled=True)
+        db_session.commit()
+        assert updated.daily_summary_enabled is True
+
+    def test_invalid_type_raises(self, db_session: Session) -> None:
+        """Passing a non-boolean raises ValueError."""
+        user = get_or_create_user(db=db_session, telegram_user_id=707071)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="must be a boolean"):
+            update_daily_summary_enabled(db=db_session, user=user, enabled=1)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: update_daily_summary_time
+# ---------------------------------------------------------------------------
+
+class TestUpdateDailySummaryTime:
+    @pytest.mark.parametrize("valid_time", ["00:00", "07:30", "09:00", "14:15", "23:59"])
+    def test_valid_summary_time_saved(self, db_session: Session, valid_time: str) -> None:
+        """Valid 24-hour HH:MM strings are accepted and persisted."""
+        user = get_or_create_user(db=db_session, telegram_user_id=808080)
+        db_session.commit()
+
+        updated = update_daily_summary_time(db=db_session, user=user, time_str=valid_time)
+        db_session.commit()
+
+        assert updated.daily_summary_time == valid_time
+
+    @pytest.mark.parametrize(
+        "invalid_time",
+        [
+            "25:00",     # Invalid hour (> 23)
+            "24:00",     # 24:00 is invalid in standard 24h
+            "12:60",     # Invalid minute (> 59)
+            "9:00",      # Missing leading zero
+            "09:0",      # Incomplete minute
+            "",          # Empty string
+            "   ",       # Whitespace only
+            " 09:00 ",   # Leading/trailing whitespace
+            "09:00:00",  # Includes seconds
+            "abc",       # Non-numeric
+            "12-30",     # Wrong separator
+            None,        # None
+        ],
+    )
+    def test_invalid_summary_time_raises(self, db_session: Session, invalid_time) -> None:
+        """Invalid 24-hour HH:MM values raise ValueError and are not saved."""
+        user = get_or_create_user(db=db_session, telegram_user_id=808081)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="Invalid summary time"):
+            update_daily_summary_time(db=db_session, user=user, time_str=invalid_time)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: update_last_summary_date
+# ---------------------------------------------------------------------------
+
+class TestUpdateLastSummaryDate:
+    def test_update_with_string_and_clear(self, db_session: Session) -> None:
+        """Can update with valid YYYY-MM-DD string and clear back to None."""
+        user = get_or_create_user(db=db_session, telegram_user_id=909090)
+        db_session.commit()
+
+        assert user.last_summary_date is None
+
+        # Update with string
+        updated = update_last_summary_date(db=db_session, user=user, summary_date="2026-10-11")
+        db_session.commit()
+        assert updated.last_summary_date == "2026-10-11"
+
+        # Clear to None
+        cleared = update_last_summary_date(db=db_session, user=user, summary_date=None)
+        db_session.commit()
+        assert cleared.last_summary_date is None
+
+    def test_update_with_date_object(self, db_session: Session) -> None:
+        """Can update with a datetime.date object."""
+        user = get_or_create_user(db=db_session, telegram_user_id=909091)
+        db_session.commit()
+
+        d = date(2026, 10, 15)
+        updated = update_last_summary_date(db=db_session, user=user, summary_date=d)
+        db_session.commit()
+        assert updated.last_summary_date == "2026-10-15"
+
+    @pytest.mark.parametrize(
+        "invalid_date",
+        [
+            "11-10-2026",  # DD-MM-YYYY format
+            "2026/10/11",  # Slashes
+            "2026-02-30",  # Invalid calendar date
+            "2026-13-01",  # Invalid month
+            "not-a-date",  # Random string
+            "",            # Empty string
+            12345,         # Integer type
+        ],
+    )
+    def test_invalid_summary_date_raises(self, db_session: Session, invalid_date) -> None:
+        """Invalid date strings or types raise ValueError."""
+        user = get_or_create_user(db=db_session, telegram_user_id=909092)
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="Invalid summary date"):
+            update_last_summary_date(db=db_session, user=user, summary_date=invalid_date)
+

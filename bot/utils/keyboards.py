@@ -9,6 +9,8 @@ Naming convention for callback_data:
   Examples: "priority:low", "confirm:save", "confirm:cancel"
 """
 
+from typing import Optional
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,35 @@ CB_SNOOZE_10M = "10m"
 CB_SNOOZE_30M = "30m"
 CB_SNOOZE_1H = "1h"
 CB_SNOOZE_TOMORROW = "tomorrow"
+
+# Phase 7: Settings & Summary callbacks
+CB_SETTINGS_TOGGLE_REMINDERS = "settings:toggle_reminders"
+CB_SETTINGS_TOGGLE_SUMMARY = "settings:toggle_summary"
+CB_SETTINGS_CHANGE_TZ = "settings:change_tz"
+CB_SETTINGS_CHANGE_TIME = "settings:change_time"
+CB_SETTINGS_REFRESH = "settings:refresh"
+CB_SETTINGS_BACK = "settings:back"
+CB_TZ_SET_PREFIX = "tz:set:"
+CB_TZ_CUSTOM = "tz:custom"
+CB_TIME_SET_PREFIX = "time:set:"
+CB_TIME_CUSTOM = "time:custom"
+CB_SUMMARY_REFRESH = "summary:refresh"
+
+# Phase 7: Predefined quick-pick options
+COMMON_TIMEZONES = [
+    ("🇮🇳 Asia/Kolkata", "Asia/Kolkata"),
+    ("🌐 UTC", "UTC"),
+    ("🇦🇪 Asia/Dubai", "Asia/Dubai"),
+    ("🇬🇧 Europe/London", "Europe/London"),
+    ("🇺🇸 America/New_York", "America/New_York"),
+]
+
+COMMON_SUMMARY_TIMES = [
+    ("🌅 07:00", "07:00"),
+    ("☕ 08:00", "08:00"),
+    ("☀️ 09:00", "09:00"),
+    ("🌙 20:00", "20:00"),
+]
 
 
 # Priority display helpers
@@ -268,5 +299,92 @@ def reminder_keyboard(task_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Settings & Daily Summary Keyboards
+# ---------------------------------------------------------------------------
+
+def settings_keyboard(
+    reminders_enabled: bool,
+    daily_summary_enabled: bool,
+) -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for the /settings dashboard.
+
+    Layout:
+      [🔔 Reminders: ON / 🔕 Reminders: OFF]
+      [📊 Daily Summary: ON / ⏹️ Daily Summary: OFF]
+      [🌐 Timezone] [⏰ Summary Time]
+      [🔄 Refresh Settings]
+    """
+    rem_text = "🔔 Reminders: ON" if reminders_enabled else "🔕 Reminders: OFF"
+    sum_text = "📊 Daily Summary: ON" if daily_summary_enabled else "⏹️ Daily Summary: OFF"
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(rem_text, callback_data=CB_SETTINGS_TOGGLE_REMINDERS)],
+            [InlineKeyboardButton(sum_text, callback_data=CB_SETTINGS_TOGGLE_SUMMARY)],
+            [
+                InlineKeyboardButton("🌐 Timezone", callback_data=CB_SETTINGS_CHANGE_TZ),
+                InlineKeyboardButton("⏰ Summary Time", callback_data=CB_SETTINGS_CHANGE_TIME),
+            ],
+            [InlineKeyboardButton("🔄 Refresh Settings", callback_data=CB_SETTINGS_REFRESH)],
+        ]
+    )
+
+
+def timezone_keyboard(current_timezone: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for selecting a timezone from common quick-picks or custom input.
+    Marks the currently active timezone with a checkmark.
+    """
+    buttons = []
+    for label, tz in COMMON_TIMEZONES:
+        btn_label = f"✅ {label}" if current_timezone == tz else label
+        buttons.append([InlineKeyboardButton(btn_label, callback_data=f"{CB_TZ_SET_PREFIX}{tz}")])
+
+    buttons.append([InlineKeyboardButton("✏️ Custom Timezone", callback_data=CB_TZ_CUSTOM)])
+    buttons.append([InlineKeyboardButton("🔙 Back to Settings", callback_data=CB_SETTINGS_BACK)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def summary_time_keyboard(current_time: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for selecting daily summary delivery time.
+    Marks the currently active time with a checkmark.
+    """
+    row1 = []
+    row2 = []
+    for idx, (label, t_val) in enumerate(COMMON_SUMMARY_TIMES):
+        btn_label = f"✅ {label}" if current_time == t_val else label
+        btn = InlineKeyboardButton(btn_label, callback_data=f"{CB_TIME_SET_PREFIX}{t_val}")
+        if idx < 2:
+            row1.append(btn)
+        else:
+            row2.append(btn)
+
+    buttons = [
+        row1,
+        row2,
+        [InlineKeyboardButton("✏️ Custom Time", callback_data=CB_TIME_CUSTOM)],
+        [InlineKeyboardButton("🔙 Back to Settings", callback_data=CB_SETTINGS_BACK)],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def summary_keyboard() -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for /summary task summary view.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data=CB_SUMMARY_REFRESH),
+                InlineKeyboardButton("📅 View Today", callback_data=CB_VIEW_TODAY),
+            ]
+        ]
+    )
+
 
 

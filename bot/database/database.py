@@ -22,7 +22,7 @@ Usage:
 
 import logging
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -83,15 +83,55 @@ SessionLocal = sessionmaker(
 # Public helpers
 # ---------------------------------------------------------------------------
 
-def init_db() -> None:
+def _migrate_schema(bind_engine: Engine) -> None:
     """
-    Create all tables that don't already exist.
+    Safely and idempotently apply missing columns to existing SQLite tables.
+    Preserves all existing user records and sets server defaults.
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(bind_engine)
+    table_names = inspector.get_table_names()
+    if "users" not in table_names:
+        return
+
+    columns = {col["name"] for col in inspector.get_columns("users")}
+
+    with bind_engine.connect() as conn:
+        if "reminders_enabled" not in columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN reminders_enabled BOOLEAN DEFAULT 1 NOT NULL;")
+            )
+            logger.info("Schema migration: added column users.reminders_enabled")
+        if "daily_summary_enabled" not in columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN daily_summary_enabled BOOLEAN DEFAULT 1 NOT NULL;")
+            )
+            logger.info("Schema migration: added column users.daily_summary_enabled")
+        if "daily_summary_time" not in columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN daily_summary_time VARCHAR(5) DEFAULT '09:00' NOT NULL;")
+            )
+            logger.info("Schema migration: added column users.daily_summary_time")
+        if "last_summary_date" not in columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN last_summary_date VARCHAR(10) DEFAULT NULL;")
+            )
+            logger.info("Schema migration: added column users.last_summary_date")
+        conn.commit()
+
+
+def init_db(bind_engine: Optional[Engine] = None) -> None:
+    """
+    Create all tables that don't already exist and ensure schema is up to date.
 
     Use this for local development / first run.
     For production, prefer: `alembic upgrade head`
     """
+    target_engine = bind_engine or engine
     logger.info("Running init_db(): creating tables if not present...")
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=target_engine)
+    _migrate_schema(target_engine)
     logger.info("Database tables verified/created.")
 
 

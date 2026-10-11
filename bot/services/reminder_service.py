@@ -28,6 +28,12 @@ from bot.utils.datetime_utils import format_dt_local
 from bot.utils.keyboards import PRIORITY_ICONS, reminder_keyboard
 from bot.utils.messages import REMINDER_NOTIFICATION
 
+# Re-export daily summary service functions for unified notification imports
+from bot.services.summary_service import (
+    process_daily_summaries,
+    send_daily_summary,
+)
+
 logger = logging.getLogger(__name__)
 
 # Mutex to ensure only one instance of process_due_reminders executes at any given time.
@@ -77,6 +83,14 @@ async def send_task_reminder(bot, task: Task) -> bool:
         logger.error("Cannot deliver reminder for task #%d: missing user or telegram_user_id.", task.id)
         return False
 
+    if not user.reminders_enabled:
+        logger.info(
+            "Skipping reminder for task #%d: user %d has reminders disabled.",
+            task.id,
+            user.telegram_user_id,
+        )
+        return False
+
     chat_id = user.telegram_user_id
     tz_string = user.timezone or settings.TIMEZONE
     message_text = format_reminder_message(task, tz_string)
@@ -122,7 +136,7 @@ async def _process_reminders_in_session(
     """
     Internal worker: fetch due tasks, deliver messages, and commit reminder_sent.
     """
-    due_tasks = get_due_tasks(db, now_utc)
+    due_tasks = get_due_tasks(db, now_utc, filter_reminders_enabled=True)
     if not due_tasks:
         return 0
 

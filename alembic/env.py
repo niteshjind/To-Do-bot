@@ -10,6 +10,7 @@ Usage:
     alembic downgrade -1      # roll back one step
 """
 
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -27,9 +28,19 @@ from bot.database.models import Base  # noqa: F401 — needed for target_metadat
 # ---------------------------------------------------------------------------
 config = context.config
 
-# Override the sqlalchemy.url in alembic.ini with the value from our settings.
-# This means the same .env file controls both the running bot AND migrations.
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Resolve database URL:
+# 1. Explicit DATABASE_URL environment variable if set.
+# 2. Programmatically configured sqlalchemy.url if explicitly provided and not the placeholder.
+# 3. bot.config.settings.DATABASE_URL (from .env).
+custom_url = os.environ.get("DATABASE_URL")
+if not custom_url:
+    current_url = config.get_main_option("sqlalchemy.url")
+    if current_url and current_url != "sqlite:///./todo_bot.db":
+        custom_url = current_url
+    else:
+        custom_url = settings.DATABASE_URL
+
+config.set_main_option("sqlalchemy.url", custom_url)
 
 # Set up Python logging using the config in alembic.ini
 if config.config_file_name is not None:
@@ -51,6 +62,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        render_as_batch=True,
     )
 
     with context.begin_transaction():
@@ -62,6 +74,18 @@ def run_migrations_offline() -> None:
 # ---------------------------------------------------------------------------
 
 def run_migrations_online() -> None:
+    connection = config.attributes.get("connection", None)
+    if connection is not None:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            render_as_batch=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -73,6 +97,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            render_as_batch=True,
         )
 
         with context.begin_transaction():

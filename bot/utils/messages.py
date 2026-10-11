@@ -9,6 +9,13 @@ Messages use Python str.format() placeholders like {first_name}.
 HTML parse_mode is used so <b> and <code> tags render in Telegram.
 """
 
+import html
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from bot.services.task_service import DailySummaryDTO
+    from bot.services.user_service import UserSettingsDTO
+
 # ===========================================================================
 # Phase 1 — /start, /help, /cancel
 # ===========================================================================
@@ -281,4 +288,144 @@ SNOOZE_SUCCESS = (
 SNOOZE_NOT_FOUND = "❌ Task #{task_id} was not found or is not owned by you."
 SNOOZE_ALREADY_COMPLETED = "ℹ️ Task #{task_id} is already completed and cannot be snoozed."
 SNOOZE_ALREADY_CANCELLED = "⚠️ Task #{task_id} is deleted and cannot be snoozed."
+
+
+# ===========================================================================
+# Phase 7 — User Settings & Daily Summary Message Formatting
+# ===========================================================================
+
+TIMEZONE_SELECTION_PROMPT = """\
+🌐 <b>Select Your Timezone</b>
+
+Current timezone: <b>{current_timezone}</b>
+
+Choose a quick-pick timezone below, or tap <b>Custom Timezone</b> to enter any valid IANA timezone (e.g. <code>Asia/Singapore</code>, <code>America/Los_Angeles</code>).\
+"""
+
+SUMMARY_TIME_SELECTION_PROMPT = """\
+⏰ <b>Select Daily Summary Time</b>
+
+Current delivery time: <b>{current_time}</b> (local time)
+
+Choose a quick-pick time below, or tap <b>Custom Time</b> to enter any 24-hour time (<code>HH:MM</code>).\
+"""
+
+
+def format_settings_message(settings: "UserSettingsDTO") -> str:
+    """
+    Format user settings into an HTML dashboard message.
+
+    Displays:
+      • Current timezone
+      • Task reminders: enabled/disabled (with icon)
+      • Daily summary: enabled/disabled (with icon)
+      • Daily summary delivery time (local)
+      • Last delivered summary date (if present)
+    """
+    rem_status = "🔔 Enabled" if settings.reminders_enabled else "🔕 Disabled"
+    sum_status = "📊 Enabled" if settings.daily_summary_enabled else "⏹️ Disabled"
+
+    lines = [
+        "⚙️ <b>Settings & Preferences</b>",
+        "",
+        f"🌐 <b>Timezone:</b> <code>{html.escape(settings.timezone)}</code>",
+        f"🔔 <b>Task Reminders:</b> {rem_status}",
+        f"📊 <b>Daily Summary:</b> {sum_status}",
+        f"⏰ <b>Summary Delivery Time:</b> <code>{html.escape(settings.daily_summary_time)}</code> (local)",
+    ]
+
+    if getattr(settings, "last_summary_date", None):
+        lines.append(f"🗓️ <b>Last Summary Sent:</b> <code>{html.escape(str(settings.last_summary_date))}</code>")
+
+    lines.extend([
+        "",
+        "<i>Use the buttons below to toggle options or change your schedule.</i>",
+    ])
+    return "\n".join(lines)
+
+
+def format_daily_summary_message(
+    summary: "DailySummaryDTO",
+    max_length: int = 4000,
+) -> str:
+    """
+    Format a DailySummaryDTO into an HTML Telegram message.
+
+    Guarantees:
+      • User-submitted task titles are safely HTML-escaped.
+      • Clear distinction between overdue tasks and today's tasks.
+      • Empty state message when there are no relevant tasks.
+      • Output is bounded and never exceeds max_length (Telegram limit is 4096).
+    """
+    from bot.utils.datetime_utils import format_date_only, format_time_only
+    from bot.utils.keyboards import PRIORITY_ICONS, STATUS_ICONS
+
+    date_str = summary.date.strftime("%d %b %Y")
+
+    if summary.today_total_count == 0 and summary.overdue_count == 0:
+        return (
+            f"📊 <b>Daily Task Summary ({date_str})</b>\n\n"
+            "🎉 <b>No tasks scheduled for today and no overdue items!</b>\n\n"
+            "Enjoy your day, or use /add to create a new task."
+        )
+
+    header_lines = [
+        f"📊 <b>Daily Task Summary ({date_str})</b>",
+        "",
+        f"📋 <b>Today's Tasks:</b> {summary.today_total_count} "
+        f"({summary.today_completed_count} completed, {summary.today_pending_count} pending)",
+    ]
+    if summary.overdue_count > 0:
+        header_lines.append(f"⚠️ <b>Overdue Tasks:</b> {summary.overdue_count}")
+
+    # Build overdue section lines
+    overdue_lines: list[str] = []
+    if summary.overdue_tasks:
+        overdue_lines.append("\n<b>⚠️ Overdue Backlog:</b>")
+        for t in summary.overdue_tasks:
+            priority_val = getattr(t.priority, "value", t.priority)
+            p_icon = PRIORITY_ICONS.get(priority_val, "⚪")
+            due_str = format_date_only(t.due_at, summary.timezone) if t.due_at else "Past"
+            escaped_title = html.escape(t.title)
+            overdue_lines.append(f"• [{p_icon}] {escaped_title} <i>(due {due_str})</i>")
+
+    # Build today's agenda lines
+    today_lines: list[str] = []
+    if summary.today_tasks:
+        today_lines.append("\n<b>📅 Today's Agenda:</b>")
+        for idx, t in enumerate(summary.today_tasks, start=1):
+            status_val = getattr(t.status, "value", t.status)
+            priority_val = getattr(t.priority, "value", t.priority)
+            s_icon = STATUS_ICONS.get(status_val, "•")
+            p_icon = PRIORITY_ICONS.get(priority_val, "⚪")
+            time_str = format_time_only(t.due_at, summary.timezone) if t.due_at else "--:--"
+            escaped_title = html.escape(t.title)
+            if status_val == "completed":
+                today_lines.append(f"{idx}. {s_icon} <b>{time_str}</b> [{p_icon}] <s>{escaped_title}</s>")
+            else:
+                today_lines.append(f"{idx}. {s_icon} <b>{time_str}</b> [{p_icon}] {escaped_title}")
+
+    # Combine with length budget enforcement
+    all_content_lines = overdue_lines + today_lines
+    rendered_parts = ["\n".join(header_lines)]
+    current_length = len(rendered_parts[0])
+    truncated_count = 0
+
+    for line in all_content_lines:
+        line_cost = len(line) + 1  # newline + line length
+        # Reserve 120 characters for truncation footnote if needed
+        if current_length + line_cost + 120 > max_length:
+            # If line is an item (not a sub-header like \n<b>...</b>)
+            if not line.startswith("\n<b>"):
+                truncated_count += 1
+        else:
+            rendered_parts.append(line)
+            current_length += line_cost
+
+    if truncated_count > 0:
+        footnote = f"\n<i>… and {truncated_count} more tasks (use /today or /upcoming to view all)</i>"
+        rendered_parts.append(footnote)
+
+    return "\n".join(rendered_parts)
+
 

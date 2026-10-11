@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # How often (seconds) the reminder-polling job runs
     REMINDER_POLL_INTERVAL_SECONDS: int = 60
 
+    # How often (seconds) the daily summary polling job runs
+    DAILY_SUMMARY_POLL_INTERVAL_SECONDS: int = 60
+
     # How many days ahead /upcoming looks by default
     UPCOMING_DAYS_WINDOW: int = 7
 

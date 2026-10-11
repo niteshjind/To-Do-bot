@@ -16,10 +16,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.config import settings
 from bot.services.reminder_service import process_due_reminders
+from bot.services.summary_service import process_daily_summaries
 
 logger = logging.getLogger(__name__)
 
 JOB_ID_POLL_REMINDERS = "poll_due_reminders"
+JOB_ID_DAILY_SUMMARY = "poll_daily_summaries"
 
 
 async def poll_reminders_job(bot) -> int:
@@ -37,18 +39,36 @@ async def poll_reminders_job(bot) -> int:
         return 0
 
 
+async def poll_daily_summaries_job(bot) -> int:
+    """
+    APScheduler job callback.
+    Polls database for users due for their daily task summary and delivers it.
+    """
+    try:
+        delivered = await process_daily_summaries(bot)
+        if delivered > 0:
+            logger.info("poll_daily_summaries_job: delivered %d daily summary/summaries.", delivered)
+        return delivered
+    except Exception as exc:
+        logger.error("Error during poll_daily_summaries_job: %s", exc, exc_info=True)
+        return 0
+
+
 def create_scheduler(bot) -> AsyncIOScheduler:
     """
     Configure and instantiate the AsyncIOScheduler.
 
-    Adds the interval job `poll_reminders_job` with:
-      - seconds: settings.REMINDER_POLL_INTERVAL_SECONDS
+    Adds two interval jobs:
+      1. `poll_reminders_job` (every REMINDER_POLL_INTERVAL_SECONDS)
+      2. `poll_daily_summaries_job` (every DAILY_SUMMARY_POLL_INTERVAL_SECONDS)
+
+    Both jobs are configured with:
       - max_instances: 1 (strictly prevents overlapping runs)
       - coalesce: True (combines missed runs into one)
       - misfire_grace_time: 60 (allows firing if event loop was briefly delayed)
 
     Args:
-        bot: Telegram Bot instance passed to the job callback.
+        bot: Telegram Bot instance passed to the job callbacks.
 
     Returns:
         Configured, unstarted AsyncIOScheduler instance.
@@ -67,10 +87,24 @@ def create_scheduler(bot) -> AsyncIOScheduler:
         misfire_grace_time=60,
         args=[bot],
     )
+    scheduler.add_job(
+        poll_daily_summaries_job,
+        trigger="interval",
+        seconds=settings.DAILY_SUMMARY_POLL_INTERVAL_SECONDS,
+        id=JOB_ID_DAILY_SUMMARY,
+        name="Poll and deliver daily task summaries",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+        args=[bot],
+    )
     logger.info(
-        "Created AsyncIOScheduler with job '%s' (interval=%ds).",
+        "Created AsyncIOScheduler with jobs '%s' (interval=%ds) and '%s' (interval=%ds).",
         JOB_ID_POLL_REMINDERS,
         settings.REMINDER_POLL_INTERVAL_SECONDS,
+        JOB_ID_DAILY_SUMMARY,
+        settings.DAILY_SUMMARY_POLL_INTERVAL_SECONDS,
     )
     return scheduler
 

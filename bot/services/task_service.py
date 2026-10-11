@@ -14,6 +14,7 @@ Design rules:
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -375,6 +376,7 @@ def edit_task(
 def get_due_tasks(
     db: Session,
     now_utc: Optional[datetime] = None,
+    filter_reminders_enabled: bool = False,
 ) -> list[Task]:
     """
     Return all pending tasks eligible for reminder delivery.
@@ -385,12 +387,14 @@ def get_due_tasks(
       3. due_at is not None
       4. due_at <= now_utc (defaults to current UTC time)
       5. Associated with an existing user who has a valid telegram_user_id
+      6. If filter_reminders_enabled is True, user.reminders_enabled must also be True.
 
     Tasks are ordered chronologically by due_at ascending, then id ascending.
 
     Args:
-        db: Active SQLAlchemy database session.
-        now_utc: Reference UTC datetime to compare against (defaults to now).
+        db:                       Active SQLAlchemy database session.
+        now_utc:                  Reference UTC datetime to compare against (defaults to now).
+        filter_reminders_enabled: If True, only include tasks for users with reminders_enabled=True.
 
     Returns:
         List of eligible Task objects with their User relationship eagerly loaded.
@@ -403,7 +407,7 @@ def get_due_tasks(
     elif now_utc.tzinfo is None:
         raise ValueError("now_utc must be a timezone-aware datetime.")
 
-    return (
+    query = (
         db.query(Task)
         .options(joinedload(Task.user))
         .join(User, Task.user_id == User.id)
@@ -414,9 +418,24 @@ def get_due_tasks(
             Task.due_at <= now_utc,
             User.telegram_user_id.isnot(None),
         )
-        .order_by(Task.due_at.asc(), Task.id.asc())
-        .all()
     )
+
+    if filter_reminders_enabled:
+        query = query.filter(User.reminders_enabled.is_(True))
+
+    return query.order_by(Task.due_at.asc(), Task.id.asc()).all()
+
+
+def is_reminder_eligible(task: Task) -> bool:
+    """
+    Check if a task's owner has reminders enabled.
+
+    Returns:
+        True if the associated user exists and has reminders_enabled=True.
+    """
+    if task.user is None:
+        return False
+    return bool(task.user.reminders_enabled)
 
 
 def mark_reminder_sent(
@@ -439,4 +458,114 @@ def mark_reminder_sent(
     db.flush()
     logger.info("Reminder marked sent for task: id=%d", task.id)
     return task
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Task Summary & Overdue Tasks
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DailySummaryDTO:
+    """
+    Structured snapshot of a user's task summary for a specific calendar day.
+
+    Safe to pass across handler boundaries, async calls, or background scheduler jobs.
+    """
+
+    user_id: int
+    telegram_user_id: int
+    date: date
+    timezone: str
+    today_tasks: list[TaskDTO]
+    today_pending_count: int
+    today_completed_count: int
+    today_total_count: int
+    overdue_tasks: list[TaskDTO]
+    overdue_count: int
+
+
+def get_overdue_tasks(
+    db: Session,
+    user: User,
+    reference_date: Optional[date] = None,
+) -> list[Task]:
+    """
+    Return all incomplete (pending) tasks for the user that were due before
+    the start of the reference date in the user's timezone.
+
+    Tasks due on the reference date itself are NOT included (they belong to today's tasks).
+    Completed and cancelled tasks are NOT included.
+    Ordered chronologically by due_at ascending, then id ascending.
+
+    Args:
+        db:             Active SQLAlchemy session.
+        user:           Owner of the tasks.
+        reference_date: Local calendar date to check against (defaults to today in user's timezone).
+
+    Returns:
+        List of pending overdue Task ORM instances.
+    """
+    start_utc, _ = get_day_boundaries_utc(user.timezone, reference_date)
+    return (
+        db.query(Task)
+        .filter(
+            Task.user_id == user.id,
+            Task.status == TaskStatus.pending,
+            Task.due_at.isnot(None),
+            Task.due_at < start_utc,
+        )
+        .order_by(Task.due_at.asc(), Task.id.asc())
+        .all()
+    )
+
+
+def get_daily_summary(
+    db: Session,
+    user: User,
+    target_date: Optional[date] = None,
+) -> DailySummaryDTO:
+    """
+    Generate structured task summary data for a user on a local date.
+
+    Includes:
+      • Tasks due today (pending and completed).
+      • Accurate completed and pending counts for today.
+      • Overdue, incomplete tasks due prior to the start of today.
+      • Clear separation between today's tasks and overdue tasks with zero double-counting.
+
+    Args:
+        db:          Active SQLAlchemy session.
+        user:        The User model instance.
+        target_date: Optional local date (defaults to today in user's timezone).
+
+    Returns:
+        DailySummaryDTO snapshot with detached TaskDTO lists and counts.
+    """
+    import pytz
+
+    local_tz = pytz.timezone(user.timezone)
+    local_date = target_date or datetime.now(local_tz).date()
+
+    raw_today_tasks = get_today_tasks(db=db, user=user, target_date=local_date)
+    raw_overdue_tasks = get_overdue_tasks(db=db, user=user, reference_date=local_date)
+
+    today_dto_list = [to_task_dto(t) for t in raw_today_tasks]
+    overdue_dto_list = [to_task_dto(t) for t in raw_overdue_tasks]
+
+    pending_count = sum(1 for t in raw_today_tasks if t.status == TaskStatus.pending)
+    completed_count = sum(1 for t in raw_today_tasks if t.status == TaskStatus.completed)
+    total_today = len(raw_today_tasks)
+
+    return DailySummaryDTO(
+        user_id=user.id,
+        telegram_user_id=user.telegram_user_id,
+        date=local_date,
+        timezone=user.timezone,
+        today_tasks=today_dto_list,
+        today_pending_count=pending_count,
+        today_completed_count=completed_count,
+        today_total_count=total_today,
+        overdue_tasks=overdue_dto_list,
+        overdue_count=len(overdue_dto_list),
+    )
 
